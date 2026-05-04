@@ -1,0 +1,26 @@
+{ test, expect, describe } from bun:test
+{ parseTTL, computeExpiresAt, isExpired } from ./cache.civet
+
+describe 'cache', =>
+  describe 'parseTTL', =>
+    test '7d', => expect(parseTTL '7d').toBe 604800
+    test '2w', => expect(parseTTL '2w').toBe 1209600
+    test '24h', => expect(parseTTL '24h').toBe 86400
+    test '30m', => expect(parseTTL '30m').toBe 1800
+    test '1m', => expect(parseTTL '1m').toBe 60
+    test 'invalid string → throws', => expect(=> parseTTL 'invalid').toThrow()
+    test 'no unit → throws', => expect(=> parseTTL '7').toThrow()
+    test 'bad unit → throws', => expect(=> parseTTL '7x').toThrow()
+
+  describe 'computeExpiresAt', =>
+    test 'adds ttl to fetchedAt', => expect(computeExpiresAt 1000, 100).toBe 1100
+    test 'zero ttl', => expect(computeExpiresAt 500, 0).toBe 500
+
+  describe 'isExpired', =>
+    test 'null expires_at → false', => expect(isExpired { expires_at: null }).toBe false
+    test 'future expires_at → false', =>
+      future := Math.floor(Date.now() / 1000) + 3600
+      expect(isExpired { expires_at: future }).toBe false
+    test 'past expires_at → true', =>
+      past := Math.floor(Date.now() / 1000) - 1
+      expect(isExpired { expires_at: past }).toBe true

@@ -1,0 +1,21 @@
+import type { Document } from "./db.civet"
+
+TTL_MULTIPLIERS: Record<string, number> :=
+  w: 604800
+  d: 86400
+  h: 3600
+  m: 60
+
+export parseTTL := (ttl: string): number =>
+  match := ttl.match /^(\d+)(w|d|h|m)$/
+  unless match
+    throw new Error `Invalid TTL: ${ttl} — expected e.g. 7d, 24h, 30m, 2w`
+  [, n, unit] := match
+  parseInt(n!) * TTL_MULTIPLIERS[unit!]!
+
+export computeExpiresAt := (fetchedAt: number, ttlSeconds: number): number =>
+  fetchedAt + ttlSeconds
+
+export isExpired := (doc: Pick<Document, "expires_at">): boolean =>
+  unless doc.expires_at? then return false
+  Math.floor(Date.now() / 1000) > doc.expires_at

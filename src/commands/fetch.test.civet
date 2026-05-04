@@ -1,0 +1,191 @@
+{ test, expect, describe, beforeEach, afterEach, spyOn } from bun:test
+{ runFetch } from ./fetch.civet
+{ upsertDocument, getDocument, _clearDocuments } from ../db.civet
+
+describe 'fetch', =>
+  originalFetch .= globalThis.fetch
+  stdoutOutput .= ''
+  stderrOutput .= ''
+  exitSpy .= null as ReturnType<typeof spyOn> | null
+  stdoutSpy .= null as ReturnType<typeof spyOn> | null
+  stderrSpy .= null as ReturnType<typeof spyOn> | null
+
+  markdownRes := (body: string) =>
+    new Response body, { status: 200, headers: { 'content-type': 'text/markdown' } }
+
+  beforeEach =>
+    _clearDocuments()
+    stdoutOutput = ''
+    stderrOutput = ''
+    globalThis.fetch = async () => markdownRes '# Fetched'
+    exitSpy = spyOn(process, 'exit').mockImplementation (code?) => throw new Error `exit:${code ?? 0}`
+    stdoutSpy = spyOn(process.stdout, 'write').mockImplementation (chunk: string) =>
+      stdoutOutput += chunk
+      true as any
+    stderrSpy = spyOn(process.stderr, 'write').mockImplementation (chunk: string) =>
+      stderrOutput += chunk
+      true as any
+
+  afterEach =>
+    globalThis.fetch = originalFetch
+    exitSpy?.mockRestore()
+    stdoutSpy?.mockRestore()
+    stderrSpy?.mockRestore()
+
+  opts := { ttl: '7d', fresh: false }
+
+  describe 'validateUrl', =>
+    test 'invalid URL → exit 2', async =>
+      await expect(runFetch 'not-a-url', opts).rejects.toThrow 'exit:2'
+
+    test 'http:// → exit 2', async =>
+      await expect(runFetch 'http://example.com/doc.md', opts).rejects.toThrow 'exit:2'
+
+    test '.txt not llms.txt → exit 2', async =>
+      await expect(runFetch 'https://example.com/other.txt', opts).rejects.toThrow 'exit:2'
+
+    test 'unsupported extension → exit 2', async =>
+      await expect(runFetch 'https://example.com/doc.pdf', opts).rejects.toThrow 'exit:2'
+
+    test 'valid .md URL accepted', async =>
+      await runFetch 'https://example.com/doc.md', opts
+      expect(stdoutOutput).toContain '# Fetched'
+
+    test 'valid .mdx URL accepted', async =>
+      await runFetch 'https://example.com/doc.mdx', opts
+      expect(stdoutOutput).toContain '# Fetched'
+
+    test 'valid /llms.txt URL accepted', async =>
+      globalThis.fetch = async () => markdownRes '# T\n\n## Docs\n'
+      await runFetch 'https://example.com/llms.txt', opts
+      expect(stdoutOutput).toContain '# T'
+
+  describe 'cache hit', =>
+    test 'returns cached content without fetching', async =>
+      upsertDocument
+        url: 'https://example.com/doc.md'
+        content: '# Cached'
+        content_hash: 'h0'
+        expires_at: null
+        etag: null
+        last_modified: null
+      fetchCalled .= false
+      globalThis.fetch = async () =>
+        fetchCalled = true
+        markdownRes '# Fresh'
+      await runFetch 'https://example.com/doc.md', opts
+      expect(stdoutOutput).toContain '# Cached'
+      expect(fetchCalled).toBe false
+
+    test 'expired cache falls through to fetch', async =>
+      past := Math.floor(Date.now() / 1000) - 1
+      upsertDocument
+        url: 'https://example.com/doc.md'
+        content: '# Old'
+        content_hash: 'h0'
+        expires_at: past
+        etag: null
+        last_modified: null
+      await runFetch 'https://example.com/doc.md', opts
+      expect(stdoutOutput).toContain '# Fetched'
+
+  describe '--fresh', =>
+    test 'deletes cache and refetches', async =>
+      upsertDocument
+        url: 'https://example.com/doc.md'
+        content: '# Old'
+        content_hash: 'h0'
+        expires_at: null
+        etag: null
+        last_modified: null
+      globalThis.fetch = async () => markdownRes '# New'
+      await runFetch 'https://example.com/doc.md', { ttl: '7d', fresh: true }
+      expect(stdoutOutput).toContain '# New'
+
+  describe '304 Not Modified', =>
+    test 'resets TTL and returns cached content', async =>
+      past := Math.floor(Date.now() / 1000) - 3600
+      upsertDocument
+        url: 'https://example.com/doc.md'
+        content: '# Cached'
+        content_hash: 'h0'
+        expires_at: past
+        etag: '"abc"'
+        last_modified: null
+      globalThis.fetch = async () => new Response null, { status: 304 }
+      await runFetch 'https://example.com/doc.md', opts
+      expect(stdoutOutput).toContain '# Cached'
+
+    test '304 without cached doc → exit 1', async =>
+      globalThis.fetch = async () => new Response null, { status: 304 }
+      await expect(runFetch 'https://example.com/doc.md', opts).rejects.toThrow 'exit:1'
+
+  describe 'llms.txt', =>
+    test 'parses and crawls child links + writes junction', async =>
+      globalThis.fetch = async (url: string) =>
+        if url.includes 'llms.txt'
+          markdownRes '# T\n\n## Docs\n\n- [A](https://child.com/a.md)'
+        else
+          markdownRes '# Child'
+      await runFetch 'https://example.com/llms.txt', opts
+      expect(getDocument 'https://child.com/a.md').not.toBeNull()
+
+    test 'invalid llms.txt → exit 1', async =>
+      globalThis.fetch = async () => markdownRes 'not valid llms.txt content'
+      await expect(runFetch 'https://example.com/llms.txt', opts).rejects.toThrow 'exit:1'
+
+  describe '--range', =>
+    test 'returns sliced lines', async =>
+      upsertDocument
+        url: 'https://example.com/doc.md'
+        content: 'line1\nline2\nline3\nline4\nline5'
+        content_hash: 'h0'
+        expires_at: null
+        etag: null
+        last_modified: null
+      await runFetch 'https://example.com/doc.md', { ttl: '7d', fresh: false, range: '2:4' }
+      expect(stdoutOutput).toContain 'line2'
+      expect(stdoutOutput).toContain 'line3'
+      expect(stdoutOutput).toContain 'line4'
+      expect(stdoutOutput).not.toContain 'line1'
+      expect(stdoutOutput).not.toContain 'line5'
+
+    test 'invalid range → exit 2', async =>
+      upsertDocument
+        url: 'https://example.com/doc.md'
+        content: 'line1\nline2'
+        content_hash: 'h0'
+        expires_at: null
+        etag: null
+        last_modified: null
+      await expect(runFetch 'https://example.com/doc.md', { ttl: '7d', fresh: false, range: 'bad' }).rejects.toThrow 'exit:2'
+
+  describe 'output newline', =>
+    test 'adds newline when content lacks one', async =>
+      upsertDocument
+        url: 'https://example.com/doc.md'
+        content: '# No newline'
+        content_hash: 'h0'
+        expires_at: null
+        etag: null
+        last_modified: null
+      await runFetch 'https://example.com/doc.md', opts
+      expect(stdoutOutput).toBe '# No newline\n'
+
+    test 'no double newline when content already ends with one', async =>
+      upsertDocument
+        url: 'https://example.com/doc.md'
+        content: '# Has newline\n'
+        content_hash: 'h0'
+        expires_at: null
+        etag: null
+        last_modified: null
+      await runFetch 'https://example.com/doc.md', opts
+      expect(stdoutOutput).toBe '# Has newline\n'
+
+  describe 'content_hash', =>
+    test 'is computed and stored on fresh fetch', async =>
+      globalThis.fetch = async () => markdownRes '# Hello'
+      await runFetch 'https://example.com/doc.md', opts
+      doc := getDocument 'https://example.com/doc.md'
+      expect(doc?.content_hash).toMatch /^[0-9a-f]{64}$/

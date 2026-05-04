@@ -1,0 +1,71 @@
+{ test, expect, describe, beforeEach } from bun:test
+{ getDocument, upsertDocument, deleteDocument, listDocuments, _clearDocuments } from ./db.civet
+
+describe 'db', =>
+  base :=
+    url: 'https://example.com/doc.md'
+    content: '# Test'
+    content_hash: 'h0'
+    expires_at: null
+    etag: null
+    last_modified: null
+
+  beforeEach => _clearDocuments()
+
+  describe 'upsertDocument / getDocument', =>
+    test 'insert and retrieve', =>
+      upsertDocument base
+      doc := getDocument base.url
+      expect(doc?.url).toBe base.url
+      expect(doc?.content).toBe base.content
+
+    test 'upsert overwrites existing', =>
+      upsertDocument base
+      upsertDocument { ...base, content: '# Updated' }
+      expect(getDocument(base.url)?.content).toBe '# Updated'
+
+    test 'get nonexistent → null', =>
+      expect(getDocument 'https://missing.com/x.md').toBeNull()
+
+    test 'stores explicit fetched_at', =>
+      upsertDocument { ...base, fetched_at: 12345 }
+      expect(getDocument(base.url)?.fetched_at).toBe 12345
+
+    test 'auto-sets fetched_at when omitted', =>
+      before := Math.floor Date.now() / 1000
+      upsertDocument base
+      after := Math.floor Date.now() / 1000
+      doc := getDocument base.url
+      expect(doc?.fetched_at).toBeGreaterThanOrEqual before
+      expect(doc?.fetched_at).toBeLessThanOrEqual after
+
+    test 'stores expires_at', =>
+      upsertDocument { ...base, expires_at: 9999999 }
+      expect(getDocument(base.url)?.expires_at).toBe 9999999
+
+    test 'stores etag and last_modified', =>
+      upsertDocument { ...base, etag: '"abc"', last_modified: 'Mon' }
+      doc := getDocument base.url
+      expect(doc?.etag).toBe '"abc"'
+      expect(doc?.last_modified).toBe 'Mon'
+
+  describe 'deleteDocument', =>
+    test 'removes document', =>
+      upsertDocument base
+      deleteDocument base.url
+      expect(getDocument base.url).toBeNull()
+
+    test 'no-op on nonexistent', =>
+      expect(=> deleteDocument 'https://none.com/x.md').not.toThrow()
+
+  describe 'listDocuments', =>
+    test 'empty → []', =>
+      expect(listDocuments()).toHaveLength 0
+
+    test 'ordered by fetched_at desc', =>
+      upsertDocument { ...base, url: 'https://a.com/a.md', fetched_at: 100 }
+      upsertDocument { ...base, url: 'https://b.com/b.md', fetched_at: 200 }
+      docs := listDocuments()
+      expect(docs).toHaveLength 2
+      expect(docs[0]!.url).toBe 'https://b.com/b.md'
+      expect(docs[1]!.url).toBe 'https://a.com/a.md'

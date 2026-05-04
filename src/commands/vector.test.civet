@@ -1,0 +1,91 @@
+{ test, expect, describe, beforeEach, afterEach, spyOn } from bun:test
+{ runVector } from ./vector.civet
+{ upsertDocument, insertVecChunk, linkDocumentToSource, isVecAvailable, _clearDocuments } from ../db.civet
+
+describe 'vector', =>
+  stdoutOutput .= ''
+  stderrOutput .= ''
+  exitSpy .= null as ReturnType<typeof spyOn> | null
+  stdoutSpy .= null as ReturnType<typeof spyOn> | null
+  stderrSpy .= null as ReturnType<typeof spyOn> | null
+  origFlag := process.env.LX_EMBED_ENABLED
+
+  fakeEmbedZeroes := async (_text: string): Promise<Float32Array> =>
+    new Float32Array(384).fill 0.1
+
+  beforeEach =>
+    _clearDocuments()
+    stdoutOutput = ''
+    stderrOutput = ''
+    exitSpy = spyOn(process, 'exit').mockImplementation (code?) => throw new Error `exit:${code ?? 0}`
+    stdoutSpy = spyOn(process.stdout, 'write').mockImplementation (chunk: string) =>
+      stdoutOutput += chunk
+      true as any
+    stderrSpy = spyOn(process.stderr, 'write').mockImplementation (chunk: string) =>
+      stderrOutput += chunk
+      true as any
+
+  afterEach =>
+    exitSpy?.mockRestore()
+    stdoutSpy?.mockRestore()
+    stderrSpy?.mockRestore()
+    if origFlag? then process.env.LX_EMBED_ENABLED = origFlag
+    else delete process.env.LX_EMBED_ENABLED
+
+  test 'flag unset → exit 2 with hint', async =>
+    delete process.env.LX_EMBED_ENABLED
+    await expect(
+      runVector 'auth', { topK: 5, json: false }, { embedText: fakeEmbedZeroes }
+    ).rejects.toThrow 'exit:2'
+    expect(stderrOutput).toContain 'LX_EMBED_ENABLED'
+
+  test 'finds best chunk per doc, deduped', async =>
+    unless isVecAvailable() then return
+    process.env.LX_EMBED_ENABLED = '1'
+    upsertDocument
+      url: 'https://x.com/a.md'
+      content: '# A'
+      content_hash: 'h0'
+      expires_at: null
+      etag: null
+      last_modified: null
+    emb := new Float32Array(384).fill 0.1
+    insertVecChunk { docUrl: 'https://x.com/a.md', chunkIdx: 0, chunkText: 'first', embedding: emb }
+    insertVecChunk { docUrl: 'https://x.com/a.md', chunkIdx: 1, chunkText: 'second', embedding: emb }
+    await runVector 'q', { topK: 5, json: true }, { embedText: fakeEmbedZeroes }
+    parsed := JSON.parse stdoutOutput
+    expect(parsed.length).toBe 1
+    expect(parsed[0].url).toBe 'https://x.com/a.md'
+
+  test '--source filter limits matches via junction', async =>
+    unless isVecAvailable() then return
+    process.env.LX_EMBED_ENABLED = '1'
+    for url of ['https://x.com/a.md', 'https://y.com/b.md']
+      upsertDocument
+        url: url
+        content: '# X'
+        content_hash: 'h0'
+        expires_at: null
+        etag: null
+        last_modified: null
+      emb := new Float32Array(384).fill 0.1
+      insertVecChunk { docUrl: url, chunkIdx: 0, chunkText: 'x', embedding: emb }
+    linkDocumentToSource 'https://x.com/a.md', 'https://x.com/llms.txt'
+    await runVector 'q', { topK: 5, json: true, source: 'https://x.com/llms.txt' }, { embedText: fakeEmbedZeroes }
+    parsed := JSON.parse stdoutOutput
+    expect(parsed).toHaveLength 1
+    expect(parsed[0].url).toBe 'https://x.com/a.md'
+
+  test 'warns about un-embedded cached docs', async =>
+    unless isVecAvailable() then return
+    process.env.LX_EMBED_ENABLED = '1'
+    upsertDocument
+      url: 'https://x.com/un.md'
+      content: '# u'
+      content_hash: 'h0'
+      expires_at: null
+      etag: null
+      last_modified: null
+    await runVector 'q', { topK: 5, json: true }, { embedText: fakeEmbedZeroes }
+    expect(stderrOutput).toContain 'no embeddings'
+    expect(stderrOutput).toContain 'https://x.com/un.md'

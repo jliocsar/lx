@@ -1,0 +1,42 @@
+export interface FetchResult
+  content: string
+  etag: string | null
+  lastModified: string | null
+
+ACCEPTED_CONTENT_TYPES := ["text/markdown", "text/plain", "text/x-markdown"]
+
+export fetchDoc := async (url: string, opts?: { etag?: string | null, lastModified?: string | null }): Promise<FetchResult | null> =>
+  headers: Record<string, string> :=
+    "Accept": "text/markdown, text/plain;q=0.9, */*;q=0.8"
+    "User-Agent": "lx/1.0"
+
+  if opts?.etag
+    headers["If-None-Match"] = opts.etag
+  if opts?.lastModified
+    headers["If-Modified-Since"] = opts.lastModified
+
+  res := await fetch url, { headers }
+
+  if res.status is 304
+    return null
+
+  unless res.ok
+    throw new Error `HTTP ${res.status} fetching ${url}`
+
+  contentType := (res.headers.get "content-type") ?? ""
+
+  if contentType.includes "text/html"
+    throw new Error `${url} returned HTML — expected markdown`
+
+  isMarkdown := ACCEPTED_CONTENT_TYPES.some (ct) => contentType.startsWith ct
+
+  unless isMarkdown
+    throw new Error `${url} returned unexpected content-type: ${contentType}`
+
+  content := await res.text()
+
+  {
+    content
+    etag: res.headers.get "etag"
+    lastModified: res.headers.get "last-modified"
+  }

@@ -1,0 +1,300 @@
+{ Database } from bun:sqlite
+{ homedir } from node:os
+{ mkdirSync } from node:fs
+{ join } from node:path
+* as sqliteVec from sqlite-vec
+
+export CACHE_DIR := join homedir(), ".cache", "lx"
+DB_PATH := process.env.LX_DB_PATH ?? join(CACHE_DIR, "cache.db")
+SCHEMA_VERSION := 1
+
+mkdirSync CACHE_DIR, { recursive: true }
+
+db := new Database DB_PATH
+
+db.exec """
+  PRAGMA journal_mode = WAL;
+  PRAGMA synchronous = NORMAL;
+  PRAGMA temp_store = MEMORY;
+  PRAGMA mmap_size = 268435456;
+  PRAGMA cache_size = -20000;
+  PRAGMA foreign_keys = ON;
+"""
+
+// Try to load sqlite-vec; capture whether it succeeded so callers can gracefully degrade.
+vecAvailable .= false
+try
+  sqliteVec.load db
+  vecAvailable = true
+catch
+  vecAvailable = false
+
+export isVecAvailable := (): boolean => vecAvailable
+
+currentVersion := (db.prepare "PRAGMA user_version").get() as { user_version: number } | null
+existing := currentVersion?.user_version ?? 0
+unless existing is SCHEMA_VERSION
+  db.exec """
+    DROP TABLE IF EXISTS documents_fts;
+    DROP TABLE IF EXISTS documents;
+    DROP TABLE IF EXISTS document_sources;
+  """
+  if vecAvailable
+    db.exec "DROP TABLE IF EXISTS vec_chunks"
+  db.exec `PRAGMA user_version = ${SCHEMA_VERSION}`
+
+db.exec """
+  CREATE TABLE IF NOT EXISTS documents (
+    url           TEXT PRIMARY KEY,
+    content       TEXT NOT NULL,
+    content_hash  TEXT NOT NULL,
+    fetched_at    INTEGER NOT NULL,
+    expires_at    INTEGER,
+    etag          TEXT,
+    last_modified TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_documents_expires ON documents(expires_at)
+    WHERE expires_at IS NOT NULL;
+
+  CREATE TABLE IF NOT EXISTS document_sources (
+    doc_url    TEXT NOT NULL,
+    source_url TEXT NOT NULL,
+    PRIMARY KEY (doc_url, source_url)
+  );
+  CREATE INDEX IF NOT EXISTS idx_document_sources_source ON document_sources(source_url);
+
+  CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
+    url UNINDEXED,
+    content,
+    content='documents',
+    content_rowid='rowid',
+    tokenize='porter unicode61 remove_diacritics 1'
+  );
+
+  CREATE TRIGGER IF NOT EXISTS documents_ai AFTER INSERT ON documents BEGIN
+    INSERT INTO documents_fts(rowid, url, content) VALUES (new.rowid, new.url, new.content);
+  END;
+  CREATE TRIGGER IF NOT EXISTS documents_ad AFTER DELETE ON documents BEGIN
+    INSERT INTO documents_fts(documents_fts, rowid, url, content)
+      VALUES ('delete', old.rowid, old.url, old.content);
+  END;
+  CREATE TRIGGER IF NOT EXISTS documents_au AFTER UPDATE ON documents BEGIN
+    INSERT INTO documents_fts(documents_fts, rowid, url, content)
+      VALUES ('delete', old.rowid, old.url, old.content);
+    INSERT INTO documents_fts(rowid, url, content) VALUES (new.rowid, new.url, new.content);
+  END;
+"""
+
+if vecAvailable
+  db.exec """
+    CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0(
+      doc_url TEXT,
+      chunk_idx INTEGER,
+      +chunk_text TEXT,
+      embedding float[384]
+    )
+  """
+
+export interface Document
+  url: string
+  content: string
+  content_hash: string
+  fetched_at: number
+  expires_at: number | null
+  etag: string | null
+  last_modified: string | null
+
+export interface DocumentSource
+  doc_url: string
+  source_url: string
+
+export interface SearchHit
+  url: string
+  snippet: string
+  score: number
+
+export interface VectorHit
+  url: string
+  chunk_text: string
+  chunk_idx: number
+  score: number
+
+getDocStmt := db.prepare<Document, [string]> "SELECT * FROM documents WHERE url = ?"
+
+upsertDocStmt := db.prepare """
+  INSERT INTO documents (url, content, content_hash, fetched_at, expires_at, etag, last_modified)
+  VALUES ($url, $content, $content_hash, $fetched_at, $expires_at, $etag, $last_modified)
+  ON CONFLICT(url) DO UPDATE SET
+    content = excluded.content,
+    content_hash = excluded.content_hash,
+    fetched_at = excluded.fetched_at,
+    expires_at = excluded.expires_at,
+    etag = excluded.etag,
+    last_modified = excluded.last_modified
+"""
+
+deleteDocStmt := db.prepare "DELETE FROM documents WHERE url = ?"
+
+listDocsStmt := db.prepare<Document, []> "SELECT * FROM documents ORDER BY fetched_at DESC"
+
+listDocsBySourceStmt := db.prepare<Document, [string]> """
+  SELECT d.* FROM documents d
+  JOIN document_sources ds ON ds.doc_url = d.url
+  WHERE ds.source_url = ?
+  ORDER BY d.fetched_at DESC
+"""
+
+upsertSourceStmt := db.prepare """
+  INSERT OR IGNORE INTO document_sources (doc_url, source_url) VALUES (?, ?)
+"""
+
+clearSourcesForDocStmt := db.prepare "DELETE FROM document_sources WHERE doc_url = ?"
+
+listSourcesStmt := db.prepare<{source_url: string, doc_count: number, last_fetched: number}, []> """
+  SELECT
+    ds.source_url AS source_url,
+    COUNT(*) AS doc_count,
+    MAX(d.fetched_at) AS last_fetched
+  FROM document_sources ds
+  JOIN documents d ON d.url = ds.doc_url
+  GROUP BY ds.source_url
+  ORDER BY last_fetched DESC
+"""
+
+export getDocument := (url: string): Document | null =>
+  getDocStmt.get url
+
+export upsertDocument := (doc: Omit<Document, "fetched_at"> & { fetched_at?: number }): void =>
+  now := Math.floor Date.now() / 1000
+  upsertDocStmt.run
+    $url: doc.url
+    $content: doc.content
+    $content_hash: doc.content_hash
+    $fetched_at: doc.fetched_at ?? now
+    $expires_at: doc.expires_at ?? null
+    $etag: doc.etag ?? null
+    $last_modified: doc.last_modified ?? null
+
+export deleteDocument := (url: string): void =>
+  deleteDocStmt.run url
+
+export listDocuments := (source?: string): Document[] =>
+  if source? then listDocsBySourceStmt.all source
+  else listDocsStmt.all()
+
+export linkDocumentToSource := (docUrl: string, sourceUrl: string): void =>
+  upsertSourceStmt.run docUrl, sourceUrl
+
+export clearSourcesForDocument := (docUrl: string): void =>
+  clearSourcesForDocStmt.run docUrl
+
+export interface SourceSummary
+  source_url: string
+  doc_count: number
+  last_fetched: number
+
+export listSources := (): SourceSummary[] =>
+  listSourcesStmt.all()
+
+searchFtsStmt := db.prepare<SearchHit, [string, number]> """
+  SELECT
+    d.url AS url,
+    snippet(documents_fts, 1, char(2), char(3), '…', 16) AS snippet,
+    bm25(documents_fts) AS score
+  FROM documents_fts
+  JOIN documents d ON d.rowid = documents_fts.rowid
+  WHERE documents_fts MATCH ?
+  ORDER BY bm25(documents_fts)
+  LIMIT ?
+"""
+
+searchFtsBySourceStmt := db.prepare<SearchHit, [string, string, number]> """
+  SELECT
+    d.url AS url,
+    snippet(documents_fts, 1, char(2), char(3), '…', 16) AS snippet,
+    bm25(documents_fts) AS score
+  FROM documents_fts
+  JOIN documents d ON d.rowid = documents_fts.rowid
+  JOIN document_sources ds ON ds.doc_url = d.url
+  WHERE documents_fts MATCH ? AND ds.source_url = ?
+  ORDER BY bm25(documents_fts)
+  LIMIT ?
+"""
+
+export searchFts := (query: string, limit: number, source?: string): SearchHit[] =>
+  if source? then searchFtsBySourceStmt.all query, source, limit
+  else searchFtsStmt.all query, limit
+
+deleteVecChunksStmt: { run: (docUrl: string) => void } | null .= null
+insertVecChunkStmt: { run: (params: {$doc_url: string, $chunk_idx: number, $chunk_text: string, $embedding: Uint8Array}) => void } | null .= null
+if vecAvailable
+  delStmt := db.prepare "DELETE FROM vec_chunks WHERE doc_url = ?"
+  deleteVecChunksStmt = { run: (docUrl: string) => { delStmt.run docUrl; return } }
+  insStmt := db.prepare """
+    INSERT INTO vec_chunks (doc_url, chunk_idx, chunk_text, embedding)
+    VALUES ($doc_url, $chunk_idx, $chunk_text, $embedding)
+  """
+  insertVecChunkStmt = { run: (params) => { insStmt.run params; return } }
+
+export deleteVecChunks := (docUrl: string): void =>
+  deleteVecChunksStmt?.run docUrl
+
+export insertVecChunk := (params: {docUrl: string, chunkIdx: number, chunkText: string, embedding: Float32Array}): void =>
+  unless insertVecChunkStmt? then return
+  // sqlite-vec accepts Float32Array via BLOB; pass as Uint8Array view of underlying buffer
+  buf := new Uint8Array params.embedding.buffer, params.embedding.byteOffset, params.embedding.byteLength
+  insertVecChunkStmt.run
+    $doc_url: params.docUrl
+    $chunk_idx: params.chunkIdx
+    $chunk_text: params.chunkText
+    $embedding: buf
+
+export vectorSearch := (queryEmbedding: Float32Array, topK: number, source?: string): VectorHit[] =>
+  unless vecAvailable then return []
+  buf := new Uint8Array queryEmbedding.buffer, queryEmbedding.byteOffset, queryEmbedding.byteLength
+  if source?
+    docUrls := (db.prepare<{doc_url: string}, [string]>(
+      "SELECT doc_url FROM document_sources WHERE source_url = ?"
+    )).all(source).map .doc_url
+    if docUrls.length is 0 then return []
+    placeholders := docUrls.map(=> "?").join ","
+    stmt := db.prepare<VectorHit, any[]> `
+      SELECT doc_url AS url, chunk_text, chunk_idx, distance AS score
+      FROM vec_chunks
+      WHERE embedding MATCH ? AND k = ? AND doc_url IN (${placeholders})
+      ORDER BY distance
+    `
+    return stmt.all buf, topK, ...docUrls
+  stmt := db.prepare<VectorHit, [Uint8Array, number]> """
+    SELECT doc_url AS url, chunk_text, chunk_idx, distance AS score
+    FROM vec_chunks
+    WHERE embedding MATCH ? AND k = ?
+    ORDER BY distance
+  """
+  stmt.all buf, topK
+
+unembeddedDocsStmt: { all: () => Document[] } | null .= null
+unembeddedDocsBySourceStmt: { all: (source: string) => Document[] } | null .= null
+if vecAvailable
+  s1 := db.prepare<Document, []> """
+    SELECT d.* FROM documents d
+    WHERE NOT EXISTS (SELECT 1 FROM vec_chunks vc WHERE vc.doc_url = d.url)
+  """
+  unembeddedDocsStmt = { all: () => s1.all() }
+  s2 := db.prepare<Document, [string]> """
+    SELECT d.* FROM documents d
+    JOIN document_sources ds ON ds.doc_url = d.url
+    WHERE ds.source_url = ?
+      AND NOT EXISTS (SELECT 1 FROM vec_chunks vc WHERE vc.doc_url = d.url)
+  """
+  unembeddedDocsBySourceStmt = { all: (source: string) => s2.all source }
+
+export listUnembeddedDocs := (source?: string): Document[] =>
+  unless vecAvailable then return []
+  if source? then (unembeddedDocsBySourceStmt!.all source)
+  else unembeddedDocsStmt!.all()
+
+export _clearDocuments := (): void =>
+  db.run "DELETE FROM documents"
+  db.run "DELETE FROM document_sources"
+  if vecAvailable then db.run "DELETE FROM vec_chunks"

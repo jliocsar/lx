@@ -1,0 +1,75 @@
+{ test, expect, describe, afterEach } from bun:test
+{ fetchDoc } from ./fetch.civet
+
+describe 'fetch', =>
+  originalFetch .= globalThis.fetch
+
+  afterEach =>
+    globalThis.fetch = originalFetch
+
+  makeMockRes := (body: string, status = 200, ct = 'text/markdown'): Response =>
+    new Response body, { status, headers: { 'content-type': ct } }
+
+  test 'text/markdown → content', async =>
+    globalThis.fetch = async () => makeMockRes '# Hello'
+    expect((await fetchDoc 'https://example.com/doc.md')?.content).toBe '# Hello'
+
+  test 'text/plain → content', async =>
+    globalThis.fetch = async () => makeMockRes '# Hello', 200, 'text/plain'
+    expect((await fetchDoc 'https://example.com/doc.md')?.content).toBe '# Hello'
+
+  test 'text/x-markdown → content', async =>
+    globalThis.fetch = async () => makeMockRes '# Hello', 200, 'text/x-markdown'
+    expect((await fetchDoc 'https://example.com/doc.md')?.content).toBe '# Hello'
+
+  test 'text/html → throws', async =>
+    globalThis.fetch = async () => makeMockRes '<html/>', 200, 'text/html'
+    await expect(fetchDoc 'https://example.com/doc.md').rejects.toThrow 'HTML'
+
+  test 'unknown content-type → throws', async =>
+    globalThis.fetch = async () => makeMockRes '{}', 200, 'application/json'
+    await expect(fetchDoc 'https://example.com/doc.md').rejects.toThrow 'content-type'
+
+  test '304 → null', async =>
+    globalThis.fetch = async () => new Response null, { status: 304 }
+    expect(await fetchDoc 'https://example.com/doc.md').toBeNull()
+
+  test 'non-200 → throws', async =>
+    globalThis.fetch = async () => makeMockRes 'Not Found', 404
+    await expect(fetchDoc 'https://example.com/doc.md').rejects.toThrow 'HTTP 404'
+
+  test 'sends If-None-Match when etag provided', async =>
+    captured .= ''
+    globalThis.fetch = async (_url: string, opts?: RequestInit) =>
+      captured = (opts?.headers as Record<string, string>)?.['If-None-Match'] ?? ''
+      makeMockRes '# Hello'
+    await fetchDoc 'https://example.com/doc.md', { etag: '"abc123"' }
+    expect(captured).toBe '"abc123"'
+
+  test 'sends If-Modified-Since when lastModified provided', async =>
+    captured .= ''
+    globalThis.fetch = async (_url: string, opts?: RequestInit) =>
+      captured = (opts?.headers as Record<string, string>)?.['If-Modified-Since'] ?? ''
+      makeMockRes '# Hello'
+    await fetchDoc 'https://example.com/doc.md', { lastModified: 'Mon, 01 Jan 2024' }
+    expect(captured).toBe 'Mon, 01 Jan 2024'
+
+  test 'returns etag from response', async =>
+    globalThis.fetch = async () =>
+      new Response '# Hello',
+        status: 200
+        headers: { 'content-type': 'text/markdown', 'etag': '"xyz"' }
+    expect((await fetchDoc 'https://example.com/doc.md')?.etag).toBe '"xyz"'
+
+  test 'returns lastModified from response', async =>
+    globalThis.fetch = async () =>
+      new Response '# Hello',
+        status: 200
+        headers: { 'content-type': 'text/markdown', 'last-modified': 'Tue, 01 Jan 2025' }
+    expect((await fetchDoc 'https://example.com/doc.md')?.lastModified).toBe 'Tue, 01 Jan 2025'
+
+  test 'null etag/lastModified when headers absent', async =>
+    globalThis.fetch = async () => makeMockRes '# Hello'
+    result := await fetchDoc 'https://example.com/doc.md'
+    expect(result?.etag).toBeNull()
+    expect(result?.lastModified).toBeNull()

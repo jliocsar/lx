@@ -1,0 +1,15 @@
+{ listSources } from ../db.civet
+
+formatDate := (ts: number): string =>
+  new Date(ts * 1000).toISOString().slice 0, 19
+
+export runSources := (): void =>
+  sources := listSources()
+
+  if sources.length is 0
+    process.stderr.write "No crawled sources.\n"
+    return
+
+  for src of sources
+    last := formatDate src.last_fetched
+    process.stdout.write `${src.source_url}\n  ${src.doc_count} doc(s)  last: ${last}\n`

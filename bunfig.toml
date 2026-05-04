@@ -1,0 +1,3 @@
+[test]
+preload = ["./src/civet-test-plugin.ts", "./src/test-setup.ts"]
+coverageSkipTestFiles = true

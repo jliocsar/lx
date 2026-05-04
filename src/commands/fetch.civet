@@ -1,0 +1,123 @@
+{ getDocument, upsertDocument, deleteDocument, deleteVecChunks, clearSourcesForDocument } from ../db.civet
+{ fetchDoc } from ../fetch.civet
+{ parseLlmsTxt, fetchAndCacheLinks } from ../crawl.civet
+{ parseTTL, computeExpiresAt, isExpired } from ../cache.civet
+{ embedDocument, isEmbedEnabled } from ../embed.civet
+
+export interface FetchOptions
+  ttl: string
+  fresh: boolean
+  range?: string
+
+validateUrl := (raw: string): URL =>
+  unless URL.canParse raw
+    process.stderr.write `Error: invalid URL: ${raw}\n`
+    process.exit 2
+
+  url := new URL raw
+
+  unless url.protocol is "https:"
+    process.stderr.write "Error: URL must use HTTPS\n"
+    process.exit 2
+
+  { pathname } := url
+
+  if pathname.endsWith ".txt"
+    unless pathname.endsWith "/llms.txt"
+      process.stderr.write "Error: .txt URL must be llms.txt\n"
+      process.exit 2
+  else unless pathname.endsWith(".md") or pathname.endsWith(".mdx")
+    process.stderr.write "Error: URL must end in .txt (llms.txt), .md, or .mdx\n"
+    process.exit 2
+
+  url
+
+applyRange := (content: string, range: string): string =>
+  match := range.match /^(\d+):(\d+)$/
+  unless match
+    process.stderr.write `Error: invalid --range format: ${range} — expected start:end\n`
+    process.exit 2
+
+  [, startStr, endStr] := match
+  start := parseInt startStr!, 10
+  end := parseInt endStr!, 10
+
+  content.split("\n").slice(start - 1, end).join "\n"
+
+export sha256Hex := async (s: string): Promise<string> =>
+  data := new TextEncoder().encode s
+  hashBuf := await crypto.subtle.digest "SHA-256", data
+  bytes := new Uint8Array hashBuf
+  Array.from(bytes).map((b) => b.toString(16).padStart 2, "0").join ""
+
+writeOutput := (content: string, range?: string): void =>
+  out := if range? then applyRange content, range else content
+  process.stdout.write out
+  unless out.endsWith "\n"
+    process.stdout.write "\n"
+
+export runFetch := async (raw: string, opts: FetchOptions): Promise<void> =>
+  url := validateUrl raw
+  urlStr := url.toString()
+
+  if opts.fresh
+    deleteDocument urlStr
+    deleteVecChunks urlStr
+    clearSourcesForDocument urlStr
+
+  cached := getDocument urlStr
+
+  if cached and not isExpired cached
+    writeOutput cached.content, opts.range
+    return
+
+  ttlSeconds := parseTTL opts.ttl
+  now := Math.floor Date.now() / 1000
+  expiresAt := computeExpiresAt now, ttlSeconds
+
+  result := await fetchDoc urlStr,
+    etag: cached?.etag
+    lastModified: cached?.last_modified
+
+  if not result and cached
+    upsertDocument
+      url: urlStr
+      content: cached.content
+      content_hash: cached.content_hash
+      fetched_at: now
+      expires_at: expiresAt
+      etag: cached.etag
+      last_modified: cached.last_modified
+    writeOutput cached.content, opts.range
+    return
+
+  unless result
+    process.stderr.write `Error: no content returned for ${urlStr}\n`
+    process.exit 1
+
+  newHash := await sha256Hex result.content
+  contentChanged := not cached or cached.content_hash !== newHash
+
+  upsertDocument
+    url: urlStr
+    content: result.content
+    content_hash: newHash
+    fetched_at: now
+    expires_at: expiresAt
+    etag: result.etag
+    last_modified: result.lastModified
+
+  if url.pathname.endsWith "/llms.txt"
+    try
+      { links } := parseLlmsTxt result.content
+      await fetchAndCacheLinks links, { ttl: opts.ttl, sourceUrl: urlStr }
+    catch err
+      process.stderr.write `Error: ${(err as Error).message}\n`
+      process.exit 1
+  else if contentChanged and isEmbedEnabled()
+    try
+      await embedDocument urlStr, result.content
+    catch err
+      process.stderr.write `Warning: embed failed for ${urlStr}: ${(err as Error).message}\n`
+
+  writeOutput result.content, opts.range

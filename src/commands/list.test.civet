@@ -1,0 +1,83 @@
+{ test, expect, describe, beforeEach, afterEach, spyOn } from bun:test
+{ runList } from ./list.civet
+{ upsertDocument, _clearDocuments } from ../db.civet
+
+describe 'list', =>
+  stdoutOutput .= ''
+  stderrOutput .= ''
+  stdoutSpy .= null as ReturnType<typeof spyOn> | null
+  stderrSpy .= null as ReturnType<typeof spyOn> | null
+  now := Math.floor Date.now() / 1000
+
+  beforeEach =>
+    _clearDocuments()
+    stdoutOutput = ''
+    stderrOutput = ''
+    stdoutSpy = spyOn(process.stdout, 'write').mockImplementation (chunk: string) =>
+      stdoutOutput += chunk
+      true as any
+    stderrSpy = spyOn(process.stderr, 'write').mockImplementation (chunk: string) =>
+      stderrOutput += chunk
+      true as any
+
+  afterEach =>
+    stdoutSpy?.mockRestore()
+    stderrSpy?.mockRestore()
+
+  seed := (url: string, expiresAt: number | null) =>
+    upsertDocument
+      url: url
+      content: '# Test'
+      content_hash: 'h0'
+      fetched_at: now
+      expires_at: expiresAt
+      etag: null
+      last_modified: null
+
+  test 'empty cache → stderr notice', =>
+    runList()
+    expect(stderrOutput).toContain 'No cached documents'
+    expect(stdoutOutput).toBe ''
+
+  test 'shows URL and fetched date', =>
+    seed 'https://example.com/doc.md', null
+    runList()
+    expect(stdoutOutput).toContain 'https://example.com/doc.md'
+    expect(stdoutOutput).toMatch /fetched:/
+
+  test 'TTL: never (null expires_at)', =>
+    seed 'https://a.com/a.md', null
+    runList()
+    expect(stdoutOutput).toContain 'never'
+
+  test 'TTL: expired', =>
+    seed 'https://a.com/a.md', now - 1
+    runList()
+    expect(stdoutOutput).toContain 'expired'
+
+  test 'TTL: seconds', =>
+    seed 'https://a.com/a.md', now + 30
+    runList()
+    expect(stdoutOutput).toMatch /\d+s/
+
+  test 'TTL: minutes', =>
+    seed 'https://a.com/a.md', now + 120
+    runList()
+    expect(stdoutOutput).toMatch /\d+m/
+
+  test 'TTL: hours', =>
+    seed 'https://a.com/a.md', now + 7200
+    runList()
+    expect(stdoutOutput).toMatch /\d+h/
+
+  test 'TTL: days', =>
+    seed 'https://a.com/a.md', now + 86400 * 3
+    runList()
+    expect(stdoutOutput).toMatch /\d+d/
+
+  test 'multiple docs all shown', =>
+    seed 'https://a.com/a.md', null
+    seed 'https://b.com/b.md', null
+    runList()
+    expect(stdoutOutput).toContain 'https://a.com/a.md'
+    expect(stdoutOutput).toContain 'https://b.com/b.md'

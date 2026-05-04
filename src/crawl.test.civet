@@ -1,0 +1,87 @@
+{ test, expect, describe, beforeEach, afterEach } from bun:test
+{ parseLlmsTxt, fetchAndCacheLinks } from ./crawl.civet
+{ getDocument, _clearDocuments } from ./db.civet
+
+describe 'crawl', =>
+  originalFetch .= globalThis.fetch
+
+  beforeEach =>
+    _clearDocuments()
+    globalThis.fetch = async (url: string) =>
+      new Response `# ${url}`,
+        status: 200
+        headers: { 'content-type': 'text/markdown' }
+
+  afterEach =>
+    globalThis.fetch = originalFetch
+
+  describe 'parseLlmsTxt', =>
+    test 'minimal (H1 only)', =>
+      { title, description, links } := parseLlmsTxt '# My Project'
+      expect(title).toBe 'My Project'
+      expect(description).toBeNull()
+      expect(links).toHaveLength 0
+
+    test 'with blockquote', =>
+      expect(parseLlmsTxt('# T\n\n> Summary').description).toBe 'Summary'
+
+    test 'leading blank lines skipped', =>
+      expect(parseLlmsTxt('\n\n# Title').title).toBe 'Title'
+
+    test 'extracts links from H2 sections', =>
+      content := '# T\n\n## Docs\n\n- [A](https://a.com/a.md)\n- [B](https://b.com/b.md)'
+      { links } := parseLlmsTxt content
+      expect(links).toHaveLength 2
+      expect(links[0]).toBe 'https://a.com/a.md'
+
+    test 'ignores links outside H2 sections', =>
+      content := '# T\n\n- [Body](https://body.com/x.md)\n\n## Docs\n\n- [Doc](https://doc.com/d.md)'
+      expect(parseLlmsTxt(content).links).toHaveLength 1
+
+    test 'multiple H2 sections', =>
+      content := '# T\n\n## A\n\n- [X](https://x.com/x.md)\n\n## B\n\n- [Y](https://y.com/y.md)'
+      expect(parseLlmsTxt(content).links).toHaveLength 2
+
+    test 'missing H1 → throws', => expect(=> parseLlmsTxt '## No H1').toThrow 'H1'
+    test 'multiple H1 → throws', => expect(=> parseLlmsTxt '# A\n\n# B').toThrow 'H1'
+
+  describe 'fetchAndCacheLinks', =>
+    sourceUrl := 'https://example.com/llms.txt'
+
+    test 'empty links → no fetch', async =>
+      fetchCalled .= false
+      globalThis.fetch = async () =>
+        fetchCalled = true
+        new Response '# x', { status: 200, headers: { 'content-type': 'text/markdown' } }
+      await fetchAndCacheLinks [], { ttl: '7d', sourceUrl }
+      expect(fetchCalled).toBe false
+
+    test 'fetches and caches all links', async =>
+      await fetchAndCacheLinks ['https://a.com/a.md', 'https://b.com/b.md'], { ttl: '7d', sourceUrl }
+      expect(getDocument 'https://a.com/a.md').not.toBeNull()
+      expect(getDocument 'https://b.com/b.md').not.toBeNull()
+
+    test 'links to source via junction', async =>
+      { listSources } := await import './db.civet'
+      await fetchAndCacheLinks ['https://a.com/a.md'], { ttl: '7d', sourceUrl }
+      sources := listSources()
+      expect(sources).toHaveLength 1
+      expect(sources[0]!.source_url).toBe sourceUrl
+      expect(sources[0]!.doc_count).toBe 1
+
+    test '304 with no prior cache → not stored', async =>
+      globalThis.fetch = async () => new Response null, { status: 304 }
+      await fetchAndCacheLinks ['https://a.com/a.md'], { ttl: '7d', sourceUrl }
+      expect(getDocument 'https://a.com/a.md').toBeNull()
+
+    test 'fetch error warns to stderr but continues', async =>
+      globalThis.fetch = async () => throw new Error 'network fail'
+      stderrOutput .= ''
+      origStderr := process.stderr.write.bind process.stderr
+      process.stderr.write = (chunk: string) =>
+        stderrOutput += chunk
+        true as any
+      await fetchAndCacheLinks ['https://fail.com/x.md'], { ttl: '7d', sourceUrl }
+      process.stderr.write = origStderr
+      expect(stderrOutput).toContain 'Warning'
+      expect(stderrOutput).toContain 'network fail'

@@ -1,0 +1,30 @@
+{
+  "name": "lx",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "bun --preload @danielx/civet/bun-civet src/index.civet",
+    "build": "bun run scripts/build.ts",
+    "test": "bun run scripts/compile-tests.ts && bun test src/; bun run scripts/cleanup-tests.ts",
+    "test:coverage": "bun run scripts/compile-tests.ts && bun test --coverage src/; bun run scripts/cleanup-tests.ts"
+  },
+  "devDependencies": {
+    "@danielx/civet": "^0.11.7",
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^4.2.0",
+    "@mastra/rag": "^2.2.1",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "sqlite-vec": "^0.1.9",
+    "zod": "^4.4.2"
+  },
+  "trustedDependencies": [
+    "onnxruntime-node",
+    "protobufjs"
+  ]
+}

@@ -1,0 +1,126 @@
+{ McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
+{ StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
+{ z } from "zod"
+{ getDocument, searchFts, vectorSearch, listSources, listDocuments, listUnembeddedDocs, isVecAvailable } from ../db.civet
+{ runFetch } from ./fetch.civet
+{ embedText, isEmbedEnabled } from ../embed.civet
+
+SNIP_OPEN := "\x02"
+SNIP_CLOSE := "\x03"
+stripMarkers := (s: string): string => s.replaceAll(SNIP_OPEN, "").replaceAll SNIP_CLOSE, ""
+
+ensureCached := async (url: string): Promise<string> =>
+  cached := getDocument url
+  if cached then return cached.content
+  origStdout := process.stdout.write.bind process.stdout
+  origStderr := process.stderr.write.bind process.stderr
+  process.stdout.write = ((_: any) => true) as any
+  process.stderr.write = ((_: any) => true) as any
+  try
+    await runFetch url, { ttl: "7d", fresh: false }
+  finally
+    process.stdout.write = origStdout
+    process.stderr.write = origStderr
+  doc := getDocument url
+  if doc then doc.content
+  else throw new Error `failed to fetch ${url}`
+
+applyRange := (content: string, range?: {start: number, end: number}): string =>
+  unless range? then return content
+  content.split("\n").slice(range.start - 1, range.end).join "\n"
+
+fetchDocConfig := {
+  description: "Fetch a markdown document from the lx cache. Fetches and caches on miss. Returns full content unless `range` is provided.",
+  inputSchema: {
+    url: z.string().describe("URL of the markdown document or llms.txt"),
+    range: z.object({
+      start: z.number().int().positive(),
+      end: z.number().int().positive()
+    }).optional().describe("1-indexed inclusive line range"),
+  },
+}
+
+searchDocsConfig := {
+  description: "Full-text search across cached docs (FTS5 with porter stemming). Returns top matches with snippet + score.",
+  inputSchema: {
+    query: z.string().describe("FTS5 query string"),
+    source: z.string().optional().describe("Filter to docs from this exact llms.txt source URL"),
+    limit: z.number().int().positive().max(100).optional().default(10),
+  },
+}
+
+vectorSearchConfig := {
+  description: "Semantic vector search across cached docs (MiniLM-L6-v2). Requires LX_EMBED_ENABLED=1. Returns top matches with chunk text + distance score.",
+  inputSchema: {
+    query: z.string().describe("Natural-language query"),
+    source: z.string().optional().describe("Filter to docs from this exact llms.txt source URL"),
+    top_k: z.number().int().positive().max(100).optional().default(10),
+  },
+}
+
+listSourcesConfig := {
+  description: "List all crawled llms.txt sources in the lx cache, with doc counts and last-fetched timestamps.",
+  inputSchema: {},
+}
+
+listDocsConfig := {
+  description: "List cached markdown documents. Optional `source` filter scopes to a specific llms.txt.",
+  inputSchema: {
+    source: z.string().optional().describe("Filter to docs from this exact llms.txt source URL"),
+  },
+}
+
+handleFetchDoc := async ({ url, range }: { url: string, range?: {start: number, end: number} }) =>
+  content := await ensureCached url
+  sliced := applyRange content, range
+  { content: [{ type: "text", text: sliced }] }
+
+handleSearchDocs := async ({ query, source, limit }: { query: string, source?: string, limit?: number }) =>
+  hits := searchFts query, limit ?? 10, source
+  payload := hits.map (h) => { url: h.url, snippet: stripMarkers(h.snippet), score: h.score }
+  { content: [{ type: "text", text: JSON.stringify(payload, null, 2) }] }
+
+handleVectorSearch := async ({ query, source, top_k }: { query: string, source?: string, top_k?: number }) =>
+  unless isEmbedEnabled() and isVecAvailable()
+    return {
+      content: [{ type: "text", text: "Error: vector search disabled. Set LX_EMBED_ENABLED=1 and re-fetch docs." }]
+      isError: true
+    }
+  k := top_k ?? 10
+  qEmb := await embedText query
+  raw := vectorSearch qEmb, k * 4, source
+  seen := new Set<string>()
+  out: typeof raw .= []
+  for h of raw
+    if out.length >= k then break
+    if seen.has h.url then continue
+    seen.add h.url
+    out.push h
+  unembedded := listUnembeddedDocs source
+  payload := {
+    results: out,
+    warning: if unembedded.length > 0 then `${unembedded.length} cached doc(s) lack embeddings and will not match. Re-fetch with --fresh to embed.` else null
+  }
+  { content: [{ type: "text", text: JSON.stringify(payload, null, 2) }] }
+
+handleListSources := async () =>
+  { content: [{ type: "text", text: JSON.stringify(listSources(), null, 2) }] }
+
+handleListDocs := async ({ source }: { source?: string }) =>
+  docs := listDocuments source
+  payload := docs.map (d) => { url: d.url, fetched_at: d.fetched_at, expires_at: d.expires_at }
+  { content: [{ type: "text", text: JSON.stringify(payload, null, 2) }] }
+
+export buildServer := (): McpServer =>
+  server := new McpServer { name: "lx", version: "1.0.0" }
+  server.registerTool "fetch_doc", fetchDocConfig, handleFetchDoc
+  server.registerTool "search_docs", searchDocsConfig, handleSearchDocs
+  server.registerTool "vector_search_docs", vectorSearchConfig, handleVectorSearch
+  server.registerTool "list_sources", listSourcesConfig, handleListSources
+  server.registerTool "list_docs", listDocsConfig, handleListDocs
+  server
+
+export runMcp := async (): Promise<void> =>
+  server := buildServer()
+  transport := new StdioServerTransport()
+  await server.connect transport

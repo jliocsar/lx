@@ -1,0 +1,28 @@
+{ listDocuments } from ../db.civet
+
+formatDate := (ts: number): string =>
+  new Date(ts * 1000).toISOString().slice 0, 19
+
+formatTTL := (expiresAt: number | null): string =>
+  unless expiresAt? then return "never"
+  remaining := expiresAt - Math.floor(Date.now() / 1000)
+  if remaining <= 0 then return "expired"
+  if remaining < 60 then return `${remaining}s`
+  if remaining < 3600 then return `${Math.floor remaining / 60}m`
+  if remaining < 86400 then return `${Math.floor remaining / 3600}h`
+  `${Math.floor remaining / 86400}d`
+
+export interface ListOptions
+  source?: string
+
+export runList := (opts?: ListOptions): void =>
+  docs := listDocuments opts?.source
+
+  if docs.length is 0
+    process.stderr.write "No cached documents.\n"
+    return
+
+  for doc of docs
+    ttl := formatTTL doc.expires_at
+    fetched := formatDate doc.fetched_at
+    process.stdout.write `${doc.url}\n  fetched: ${fetched}  ttl: ${ttl}\n`

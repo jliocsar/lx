@@ -1,0 +1,77 @@
+{ test, expect, describe, beforeEach, afterEach, spyOn } from bun:test
+{ runSearch } from ./search.civet
+{ upsertDocument, linkDocumentToSource, _clearDocuments } from ../db.civet
+
+describe 'search', =>
+  stdoutOutput .= ''
+  stderrOutput .= ''
+  exitSpy .= null as ReturnType<typeof spyOn> | null
+  stdoutSpy .= null as ReturnType<typeof spyOn> | null
+  stderrSpy .= null as ReturnType<typeof spyOn> | null
+
+  beforeEach =>
+    _clearDocuments()
+    stdoutOutput = ''
+    stderrOutput = ''
+    exitSpy = spyOn(process, 'exit').mockImplementation (code?) => throw new Error `exit:${code ?? 0}`
+    stdoutSpy = spyOn(process.stdout, 'write').mockImplementation (chunk: string) =>
+      stdoutOutput += chunk
+      true as any
+    stderrSpy = spyOn(process.stderr, 'write').mockImplementation (chunk: string) =>
+      stderrOutput += chunk
+      true as any
+
+  afterEach =>
+    exitSpy?.mockRestore()
+    stdoutSpy?.mockRestore()
+    stderrSpy?.mockRestore()
+
+  baseDoc := (url: string, content: string) =>
+    upsertDocument
+      url: url
+      content: content
+      content_hash: 'h0'
+      expires_at: null
+      etag: null
+      last_modified: null
+
+  test 'empty query → exit 2', =>
+    expect(=> runSearch '', { limit: 10, json: false }).toThrow 'exit:2'
+
+  test 'no matches → stderr notice', =>
+    runSearch 'zzzzzznothingmatches', { limit: 10, json: false }
+    expect(stderrOutput).toContain 'No matches'
+
+  test 'finds doc by content', =>
+    baseDoc 'https://x.com/a.md', '# Auth flow\n\nThis describes authentication.'
+    runSearch 'authentication', { limit: 10, json: false }
+    expect(stdoutOutput).toContain 'https://x.com/a.md'
+
+  test 'porter stemming finds variants', =>
+    baseDoc 'https://x.com/a.md', '# Authenticating users\n\nFlow runs.'
+    runSearch 'authenticate', { limit: 10, json: false }
+    expect(stdoutOutput).toContain 'https://x.com/a.md'
+
+  test '--source filter scopes to junction', =>
+    baseDoc 'https://x.com/a.md', '# Hello world'
+    baseDoc 'https://y.com/b.md', '# Hello world'
+    linkDocumentToSource 'https://x.com/a.md', 'https://x.com/llms.txt'
+    runSearch 'hello', { limit: 10, json: false, source: 'https://x.com/llms.txt' }
+    expect(stdoutOutput).toContain 'https://x.com/a.md'
+    expect(stdoutOutput).not.toContain 'https://y.com/b.md'
+
+  test 'limit caps results', =>
+    for i of [1..3]
+      baseDoc `https://x.com/${i}.md`, "# Hello ${i}"
+    runSearch 'hello', { limit: 2, json: false }
+    matches := stdoutOutput.match(/https:\/\/x\.com\//g) ?? []
+    expect(matches.length).toBe 2
+
+  test '--json emits JSON array', =>
+    baseDoc 'https://x.com/a.md', '# Hello world'
+    runSearch 'hello', { limit: 10, json: true }
+    parsed := JSON.parse stdoutOutput
+    expect(Array.isArray parsed).toBe true
+    expect(parsed[0].url).toBe 'https://x.com/a.md'
+    expect(typeof parsed[0].snippet).toBe 'string'
+    expect(typeof parsed[0].score).toBe 'number'

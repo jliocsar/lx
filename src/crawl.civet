@@ -1,0 +1,116 @@
+{ fetchDoc } from ./fetch.civet
+{ upsertDocument, linkDocumentToSource, getDocument, deleteVecChunks } from ./db.civet
+{ parseTTL, computeExpiresAt } from ./cache.civet
+{ embedDocument, isEmbedEnabled } from ./embed.civet
+
+LINK_PATTERN := /\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g
+
+export interface ParsedLlms
+  title: string
+  description: string | null
+  links: string[]
+
+export parseLlmsTxt := (content: string): ParsedLlms =>
+  lines := content.split "\n"
+  i .= 0
+
+  while i < lines.length and lines[i]!.trim() is ""
+    i++
+
+  unless lines[i]?.startsWith "# "
+    throw new Error "Invalid llms.txt: must begin with an H1 heading"
+
+  title := lines[i]!.slice(2).trim()
+  i++
+
+  description .= null as string | null
+  blockquoteLines: string[] .= []
+
+  while i < lines.length and (lines[i]!.trim() is "" or lines[i]!.startsWith "> ")
+    line := lines[i]!
+    if line.startsWith "> "
+      blockquoteLines.push line.slice 2
+    i++
+
+  if blockquoteLines.length > 0
+    description = blockquoteLines.join " "
+
+  links: string[] .= []
+
+  while i < lines.length
+    line := lines[i]!
+
+    if line.startsWith "# "
+      throw new Error "Invalid llms.txt: only one H1 heading allowed"
+
+    if line.startsWith "## "
+      i++
+      while i < lines.length and not lines[i]!.startsWith("##") and not lines[i]!.startsWith("# ")
+        for [, , url] of lines[i]!.matchAll LINK_PATTERN
+          links.push url
+        i++
+    else
+      i++
+
+  { title, description, links }
+
+pool := async <T>(items: T[], concurrency: number, fn: (item: T) => Promise<void>): Promise<void> =>
+  i .= 0
+  workers := Array.from { length: Math.min(concurrency, items.length) }, async =>
+    while i < items.length
+      current := items[i++]!
+      await fn current
+  await Promise.all workers
+
+sha256Hex := async (s: string): Promise<string> =>
+  data := new TextEncoder().encode s
+  hashBuf := await crypto.subtle.digest "SHA-256", data
+  bytes := new Uint8Array hashBuf
+  Array.from(bytes).map((b) => b.toString(16).padStart 2, "0").join ""
+
+export fetchAndCacheLinks := async (
+  links: string[],
+  opts: { ttl: string, sourceUrl: string }
+): Promise<void> =>
+  unless links.length then return
+
+  ttlSeconds := parseTTL opts.ttl
+  now := Math.floor Date.now() / 1000
+  expiresAt := computeExpiresAt now, ttlSeconds
+
+  await pool links, 10, async (url) =>
+    try
+      cached := getDocument url
+      result := await fetchDoc url,
+        etag: cached?.etag
+        lastModified: cached?.last_modified
+      linkDocumentToSource url, opts.sourceUrl
+      unless result
+        // 304 Not Modified — refresh TTL on cached row
+        if cached
+          upsertDocument
+            url: url
+            content: cached.content
+            content_hash: cached.content_hash
+            fetched_at: now
+            expires_at: expiresAt
+            etag: cached.etag
+            last_modified: cached.last_modified
+        return
+      newHash := await sha256Hex result.content
+      contentChanged := not cached or cached.content_hash !== newHash
+      upsertDocument
+        url: url
+        content: result.content
+        content_hash: newHash
+        fetched_at: now
+        expires_at: expiresAt
+        etag: result.etag
+        last_modified: result.lastModified
+      if contentChanged and isEmbedEnabled()
+        try
+          await embedDocument url, result.content
+        catch err
+          process.stderr.write `Warning: embed failed for ${url}: ${(err as Error).message}\n`
+    catch err
+      process.stderr.write `Warning: failed to fetch ${url}: ${(err as Error).message}\n`

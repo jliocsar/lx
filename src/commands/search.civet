@@ -1,0 +1,39 @@
+{ searchFts } from ../db.civet
+
+export interface SearchOptions
+  source?: string
+  limit: number
+  json: boolean
+
+// FTS5 snippet markers (we passed char(2) and char(3) as delimiters).
+SNIP_OPEN := "\x02"
+SNIP_CLOSE := "\x03"
+
+ANSI_BOLD := "\x1b[1m"
+ANSI_RESET := "\x1b[0m"
+
+renderSnippet := (snippet: string, useColor: boolean): string =>
+  unless useColor
+    return snippet.replaceAll(SNIP_OPEN, "").replaceAll SNIP_CLOSE, ""
+  snippet
+    .replaceAll(SNIP_OPEN, ANSI_BOLD)
+    .replaceAll SNIP_CLOSE, ANSI_RESET
+
+export runSearch := (query: string, opts: SearchOptions): void =>
+  unless query
+    process.stderr.write "Error: search query required\n"
+    process.exit 2
+
+  hits := searchFts query, opts.limit, opts.source
+
+  if opts.json
+    process.stdout.write JSON.stringify(hits.map((h) => {url: h.url, snippet: renderSnippet(h.snippet, false), score: h.score})) + "\n"
+    return
+
+  if hits.length is 0
+    process.stderr.write "No matches.\n"
+    return
+
+  useColor := process.stdout.isTTY ?? false
+  for hit of hits
+    process.stdout.write `${hit.url}\n  ${renderSnippet hit.snippet, useColor}\n`

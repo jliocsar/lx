@@ -1,0 +1,123 @@
+{ test, expect, describe, beforeEach, afterEach, mock, spyOn } from bun:test
+{ main } from ./index.civet
+
+describe 'index', =>
+  mockRunFetch := mock async (_url: string, _opts: unknown): Promise<void> =>
+  mockRunList := mock (_opts?: unknown): void =>
+  mockRunSources := mock (): void =>
+  mockRunSearch := mock (_q: string, _opts: unknown): void =>
+  mockRunVector := mock async (_q: string, _opts: unknown): Promise<void> =>
+  mockRunMcp := mock async (): Promise<void> =>
+  exitSpy .= null as ReturnType<typeof spyOn> | null
+  stdoutOutput .= ''
+  stderrOutput .= ''
+  stdoutSpy .= null as ReturnType<typeof spyOn> | null
+  stderrSpy .= null as ReturnType<typeof spyOn> | null
+
+  beforeEach =>
+    mockRunFetch.mockClear()
+    mockRunList.mockClear()
+    mockRunSources.mockClear()
+    mockRunSearch.mockClear()
+    mockRunVector.mockClear()
+    mockRunMcp.mockClear()
+    stdoutOutput = ''
+    stderrOutput = ''
+    exitSpy = spyOn(process, 'exit').mockImplementation (code?) => throw new Error `exit:${code ?? 0}`
+    stdoutSpy = spyOn(process.stdout, 'write').mockImplementation (chunk: string) =>
+      stdoutOutput += chunk
+      true as any
+    stderrSpy = spyOn(process.stderr, 'write').mockImplementation (chunk: string) =>
+      stderrOutput += chunk
+      true as any
+
+  afterEach =>
+    exitSpy?.mockRestore()
+    stdoutSpy?.mockRestore()
+    stderrSpy?.mockRestore()
+
+  deps :=
+    runFetch: mockRunFetch as any
+    runList: mockRunList as any
+    runSources: mockRunSources as any
+    runSearch: mockRunSearch as any
+    runVector: mockRunVector as any
+    runMcp: mockRunMcp as any
+
+  test '--help shows help text and exits 0', async =>
+    await expect(main ['--help'], deps).rejects.toThrow 'exit:0'
+    expect(stdoutOutput).toContain 'lx'
+
+  test '-h is alias for --help', async =>
+    await expect(main ['-h'], deps).rejects.toThrow 'exit:0'
+    expect(stdoutOutput).toContain 'lx'
+
+  test 'no args → exits 2', async =>
+    await expect(main [], deps).rejects.toThrow 'exit:2'
+
+  test 'unknown subcommand → exits 2', async =>
+    await expect(main ['frobnicate'], deps).rejects.toThrow 'exit:2'
+    expect(stderrOutput).toContain 'unknown subcommand'
+
+  test 'fetch <url> → calls runFetch with defaults', async =>
+    await expect(main ['fetch', 'https://example.com/doc.md'], deps).rejects.toThrow 'exit:0'
+    expect(mockRunFetch).toHaveBeenCalledWith 'https://example.com/doc.md',
+      expect.objectContaining { ttl: '7d', fresh: false }
+
+  test 'fetch with no URL → exits 2', async =>
+    await expect(main ['fetch'], deps).rejects.toThrow 'exit:2'
+    expect(stderrOutput).toContain 'fetch requires a URL'
+
+  test 'fetch --ttl forwarded', async =>
+    await expect(main ['fetch', 'https://x.com/d.md', '--ttl', '24h'], deps).rejects.toThrow 'exit:0'
+    expect(mockRunFetch).toHaveBeenCalledWith expect.anything(),
+      expect.objectContaining { ttl: '24h' }
+
+  test 'fetch --fresh forwarded', async =>
+    await expect(main ['fetch', 'https://x.com/d.md', '--fresh'], deps).rejects.toThrow 'exit:0'
+    expect(mockRunFetch).toHaveBeenCalledWith expect.anything(),
+      expect.objectContaining { fresh: true }
+
+  test 'fetch --range forwarded', async =>
+    await expect(main ['fetch', 'https://x.com/d.md', '--range', '1:5'], deps).rejects.toThrow 'exit:0'
+    expect(mockRunFetch).toHaveBeenCalledWith expect.anything(),
+      expect.objectContaining { range: '1:5' }
+
+  test 'list → calls runList and exits 0', async =>
+    await expect(main ['list'], deps).rejects.toThrow 'exit:0'
+    expect(mockRunList).toHaveBeenCalledTimes 1
+
+  test 'list --source forwarded', async =>
+    await expect(main ['list', '--source', 'https://x.com/llms.txt'], deps).rejects.toThrow 'exit:0'
+    expect(mockRunList).toHaveBeenCalledWith expect.objectContaining { source: 'https://x.com/llms.txt' }
+
+  test 'sources → calls runSources and exits 0', async =>
+    await expect(main ['sources'], deps).rejects.toThrow 'exit:0'
+    expect(mockRunSources).toHaveBeenCalledTimes 1
+
+  test 'search "query" → calls runSearch with defaults', async =>
+    await expect(main ['search', 'hello'], deps).rejects.toThrow 'exit:0'
+    expect(mockRunSearch).toHaveBeenCalledWith 'hello',
+      expect.objectContaining { limit: 10, json: false }
+
+  test 'search with no query → exits 2', async =>
+    await expect(main ['search'], deps).rejects.toThrow 'exit:2'
+
+  test 'search --limit + --json forwarded', async =>
+    await expect(main ['search', 'hi', '--limit', '5', '--json'], deps).rejects.toThrow 'exit:0'
+    expect(mockRunSearch).toHaveBeenCalledWith 'hi',
+      expect.objectContaining { limit: 5, json: true }
+
+  test 'vector "query" → calls runVector with defaults', async =>
+    await expect(main ['vector', 'auth'], deps).rejects.toThrow 'exit:0'
+    expect(mockRunVector).toHaveBeenCalledWith 'auth',
+      expect.objectContaining { topK: 10, json: false }
+
+  test 'vector --top-k forwarded', async =>
+    await expect(main ['vector', 'auth', '--top-k', '3'], deps).rejects.toThrow 'exit:0'
+    expect(mockRunVector).toHaveBeenCalledWith 'auth',
+      expect.objectContaining { topK: 3 }
+
+  test 'mcp → calls runMcp', async =>
+    await main ['mcp'], deps
+    expect(mockRunMcp).toHaveBeenCalledTimes 1

@@ -1,0 +1,138 @@
+{ parseArgs } from node:util
+{ runFetch } from ./commands/fetch.civet
+{ runList } from ./commands/list.civet
+{ runSources } from ./commands/sources.civet
+{ runSearch } from ./commands/search.civet
+{ runVector } from ./commands/vector.civet
+{ runMcp } from ./commands/mcp.civet
+
+HELP := """
+  lx — blazingly fast markdown fetcher, cache, and searchable corpus
+
+  Usage:
+    lx fetch <url> [options]   fetch and cache a markdown doc or llms.txt
+    lx list [--source <url>]   list cached documents
+    lx sources                 list crawled llms.txt sources
+    lx search <query> [...]    full-text search (FTS5) across the cache
+    lx vector <query> [...]    semantic search (requires LX_EMBED_ENABLED=1)
+    lx mcp                     run as an MCP stdio server
+    lx --help                  show this help message
+
+  fetch options:
+    --ttl <value>          cache TTL (e.g. 7d, 24h, 30m, 2w) [default: 7d]
+    --fresh                bust cache for this URL and refetch
+    --range <start:end>    return only lines start–end (1-indexed, inclusive)
+
+  search / vector options:
+    --source <url>         filter to a specific llms.txt source
+    --limit <N>            max hits (search) [default: 10]
+    --top-k <N>            max hits (vector) [default: 10]
+    --json                 emit JSON output
+
+  list options:
+    --source <url>         filter to a specific llms.txt source
+"""
+
+export interface MainDeps
+  runFetch?: typeof runFetch
+  runList?: typeof runList
+  runSources?: typeof runSources
+  runSearch?: typeof runSearch
+  runVector?: typeof runVector
+  runMcp?: typeof runMcp
+
+export main := async (argv: string[], deps?: MainDeps): Promise<void> =>
+  _runFetch := deps?.runFetch ?? runFetch
+  _runList := deps?.runList ?? runList
+  _runSources := deps?.runSources ?? runSources
+  _runSearch := deps?.runSearch ?? runSearch
+  _runVector := deps?.runVector ?? runVector
+  _runMcp := deps?.runMcp ?? runMcp
+
+  if argv[0] is "--help" or argv[0] is "-h"
+    process.stdout.write HELP + "\n"
+    process.exit 0
+
+  [subcommand, ...rest] := argv
+
+  unless subcommand
+    process.stderr.write HELP + "\n"
+    process.exit 2
+
+  switch subcommand
+    when "fetch"
+      { values, positionals } := parseArgs
+        args: rest
+        options:
+          ttl: { type: "string" }
+          fresh: { type: "boolean", default: false }
+          range: { type: "string" }
+        allowPositionals: true
+      [url] := positionals
+      unless url
+        process.stderr.write "Error: fetch requires a URL\n"
+        process.exit 2
+      await _runFetch url,
+        ttl: values.ttl ?? "7d"
+        fresh: values.fresh ?? false
+        range: values.range
+      process.exit 0
+
+    when "list"
+      { values } := parseArgs
+        args: rest
+        options:
+          source: { type: "string" }
+        allowPositionals: true
+      _runList { source: values.source }
+      process.exit 0
+
+    when "sources"
+      _runSources()
+      process.exit 0
+
+    when "search"
+      { values, positionals } := parseArgs
+        args: rest
+        options:
+          source: { type: "string" }
+          limit: { type: "string" }
+          json: { type: "boolean", default: false }
+        allowPositionals: true
+      [query] := positionals
+      unless query
+        process.stderr.write "Error: search requires a query\n"
+        process.exit 2
+      _runSearch query,
+        source: values.source
+        limit: parseInt(values.limit ?? "10", 10)
+        json: values.json ?? false
+      process.exit 0
+
+    when "vector"
+      { values, positionals } := parseArgs
+        args: rest
+        options:
+          source: { type: "string" }
+          "top-k": { type: "string" }
+          json: { type: "boolean", default: false }
+        allowPositionals: true
+      [query] := positionals
+      unless query
+        process.stderr.write "Error: vector requires a query\n"
+        process.exit 2
+      await _runVector query,
+        source: values.source
+        topK: parseInt(values["top-k"] ?? "10", 10)
+        json: values.json ?? false
+      process.exit 0
+
+    when "mcp"
+      await _runMcp()
+      // mcp blocks until stdio closes; don't exit eagerly
+
+    else
+      process.stderr.write `Error: unknown subcommand: ${subcommand}\n\n${HELP}\n`
+      process.exit 2
+
+if import.meta.main then await main Bun.argv.slice 2

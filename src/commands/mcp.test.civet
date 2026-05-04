@@ -1,0 +1,91 @@
+{ test, expect, describe, beforeEach } from bun:test
+{ buildServer } from ./mcp.civet
+{ upsertDocument, linkDocumentToSource, _clearDocuments } from ../db.civet
+
+// Reach into the McpServer's private _registeredTools map to invoke handlers directly.
+// This avoids spinning up a real stdio process while still exercising the registered logic.
+callTool := async (server: any, name: string, args: Record<string, any>): Promise<any> =>
+  tool := server._registeredTools[name]
+  unless tool? then throw new Error `tool not registered: ${name}`
+  await tool.handler args, {}
+
+describe 'mcp tools', =>
+  beforeEach =>
+    _clearDocuments()
+
+  seed := =>
+    upsertDocument
+      url: 'https://x.com/a.md'
+      content: '# Hello world\n\nAuth flow.'
+      content_hash: 'h0'
+      expires_at: null
+      etag: null
+      last_modified: null
+    linkDocumentToSource 'https://x.com/a.md', 'https://x.com/llms.txt'
+
+  test 'list_sources returns crawled sources', async =>
+    seed()
+    server := buildServer()
+    res := await callTool server, 'list_sources', {}
+    parsed := JSON.parse res.content[0].text
+    expect(parsed).toHaveLength 1
+    expect(parsed[0].source_url).toBe 'https://x.com/llms.txt'
+
+  test 'list_docs returns cached docs', async =>
+    seed()
+    server := buildServer()
+    res := await callTool server, 'list_docs', {}
+    parsed := JSON.parse res.content[0].text
+    expect(parsed).toHaveLength 1
+    expect(parsed[0].url).toBe 'https://x.com/a.md'
+
+  test 'list_docs honors source filter', async =>
+    seed()
+    upsertDocument
+      url: 'https://y.com/orphan.md'
+      content: '# orphan'
+      content_hash: 'h0'
+      expires_at: null
+      etag: null
+      last_modified: null
+    server := buildServer()
+    res := await callTool server, 'list_docs', { source: 'https://x.com/llms.txt' }
+    parsed := JSON.parse res.content[0].text
+    expect(parsed).toHaveLength 1
+    expect(parsed[0].url).toBe 'https://x.com/a.md'
+
+  test 'search_docs returns FTS hits', async =>
+    seed()
+    server := buildServer()
+    res := await callTool server, 'search_docs', { query: 'auth' }
+    parsed := JSON.parse res.content[0].text
+    expect(parsed.length).toBeGreaterThan 0
+    expect(parsed[0].url).toBe 'https://x.com/a.md'
+
+  test 'fetch_doc returns cached content', async =>
+    seed()
+    server := buildServer()
+    res := await callTool server, 'fetch_doc', { url: 'https://x.com/a.md' }
+    expect(res.content[0].text).toContain 'Hello world'
+
+  test 'fetch_doc with range slices', async =>
+    upsertDocument
+      url: 'https://x.com/multi.md'
+      content: 'a\nb\nc\nd\ne'
+      content_hash: 'h0'
+      expires_at: null
+      etag: null
+      last_modified: null
+    server := buildServer()
+    res := await callTool server, 'fetch_doc', { url: 'https://x.com/multi.md', range: { start: 2, end: 4 } }
+    expect(res.content[0].text).toBe 'b\nc\nd'
+
+  test 'vector_search_docs errors when flag is unset', async =>
+    seed()
+    origFlag := process.env.LX_EMBED_ENABLED
+    delete process.env.LX_EMBED_ENABLED
+    server := buildServer()
+    res := await callTool server, 'vector_search_docs', { query: 'auth' }
+    expect(res.isError).toBe true
+    expect(res.content[0].text).toContain 'LX_EMBED_ENABLED'
+    if origFlag? then process.env.LX_EMBED_ENABLED = origFlag

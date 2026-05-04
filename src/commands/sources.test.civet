@@ -1,0 +1,50 @@
+{ test, expect, describe, beforeEach, afterEach, spyOn } from bun:test
+{ runSources } from ./sources.civet
+{ upsertDocument, linkDocumentToSource, _clearDocuments } from ../db.civet
+
+describe 'sources', =>
+  stdoutOutput .= ''
+  stderrOutput .= ''
+  stdoutSpy .= null as ReturnType<typeof spyOn> | null
+  stderrSpy .= null as ReturnType<typeof spyOn> | null
+
+  beforeEach =>
+    _clearDocuments()
+    stdoutOutput = ''
+    stderrOutput = ''
+    stdoutSpy = spyOn(process.stdout, 'write').mockImplementation (chunk: string) =>
+      stdoutOutput += chunk
+      true as any
+    stderrSpy = spyOn(process.stderr, 'write').mockImplementation (chunk: string) =>
+      stderrOutput += chunk
+      true as any
+
+  afterEach =>
+    stdoutSpy?.mockRestore()
+    stderrSpy?.mockRestore()
+
+  test 'empty cache → stderr notice', =>
+    runSources()
+    expect(stderrOutput).toContain 'No crawled sources'
+
+  test 'lists sources with doc counts', =>
+    src := 'https://x.com/llms.txt'
+    upsertDocument
+      url: 'https://x.com/a.md'
+      content: '# A'
+      content_hash: 'h0'
+      expires_at: null
+      etag: null
+      last_modified: null
+    upsertDocument
+      url: 'https://x.com/b.md'
+      content: '# B'
+      content_hash: 'h0'
+      expires_at: null
+      etag: null
+      last_modified: null
+    linkDocumentToSource 'https://x.com/a.md', src
+    linkDocumentToSource 'https://x.com/b.md', src
+    runSources()
+    expect(stdoutOutput).toContain src
+    expect(stdoutOutput).toContain '2 doc'

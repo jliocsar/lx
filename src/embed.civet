@@ -1,0 +1,74 @@
+{ insertVecChunk, deleteVecChunks, isVecAvailable } from ./db.civet
+{ join } from node:path
+{ homedir } from node:os
+
+MODEL_ID := "Xenova/all-MiniLM-L6-v2"
+
+export isEmbedEnabled := (): boolean =>
+  v := process.env.LX_EMBED_ENABLED
+  v is "1" or v is "true"
+
+embedderPromise: Promise<any> | null .= null
+
+// Dynamic import keeps transformers.js (and onnxruntime-node) out of the eager load graph.
+// Standalone binary builds skip embedding via LX_EMBED_ENABLED; the binary never reaches this path.
+loadEmbedder := async (): Promise<any> =>
+  unless embedderPromise?
+    embedderPromise = (async () =>
+      mod := await import "@huggingface/transformers"
+      mod.env.cacheDir = join homedir(), ".cache", "lx", "models"
+      mod.env.allowRemoteModels = true
+      await mod.pipeline "feature-extraction", MODEL_ID, { dtype: "q8" }
+    )()
+  embedderPromise
+
+export interface MarkdownChunk
+  text: string
+  h1?: string
+  h2?: string
+  h3?: string
+
+export chunkMarkdown := async (content: string): Promise<MarkdownChunk[]> =>
+  mod := await import "@mastra/rag"
+  doc := mod.MDocument.fromMarkdown content
+  chunks := await doc.chunk
+    strategy: 'markdown'
+    headers: [
+      ['#', 'h1']
+      ['##', 'h2']
+      ['###', 'h3']
+    ]
+    stripHeaders: true
+  chunks
+    .map (c: any): MarkdownChunk =>
+      text: (c.text ?? "").trim()
+      h1: c.metadata?.h1
+      h2: c.metadata?.h2
+      h3: c.metadata?.h3
+    .filter (c: MarkdownChunk) => c.text.length > 0
+
+export embedText := async (text: string): Promise<Float32Array> =>
+  pipe := await loadEmbedder()
+  out := await pipe text, { pooling: "mean", normalize: true }
+  out.data as Float32Array
+
+export interface EmbedDeps
+  embedText?: typeof embedText
+  chunkMarkdown?: typeof chunkMarkdown
+
+export embedDocument := async (url: string, content: string, deps?: EmbedDeps): Promise<void> =>
+  unless isEmbedEnabled() and isVecAvailable() then return
+  _embedText := deps?.embedText ?? embedText
+  _chunkMarkdown := deps?.chunkMarkdown ?? chunkMarkdown
+  deleteVecChunks url
+  chunks := await _chunkMarkdown content
+  unless chunks.length then return
+  for chunk, idx of chunks
+    headerPath := [chunk.h1, chunk.h2, chunk.h3].filter(Boolean).join " > "
+    inputText := if headerPath then `${headerPath}\n${chunk.text}` else chunk.text
+    embedding := await _embedText inputText
+    insertVecChunk
+      docUrl: url
+      chunkIdx: idx
+      chunkText: chunk.text
+      embedding: embedding

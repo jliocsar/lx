@@ -1,0 +1,56 @@
+{ vectorSearch, listUnembeddedDocs, isVecAvailable } from ../db.civet
+{ embedText, isEmbedEnabled } from ../embed.civet
+
+export interface VectorOptions
+  source?: string
+  topK: number
+  json: boolean
+
+export interface VectorDeps
+  embedText?: typeof embedText
+
+export runVector := async (query: string, opts: VectorOptions, deps?: VectorDeps): Promise<void> =>
+  unless query
+    process.stderr.write "Error: vector query required\n"
+    process.exit 2
+
+  unless isEmbedEnabled()
+    process.stderr.write "Error: vector search disabled. Set LX_EMBED_ENABLED=1 and re-fetch docs to enable.\n"
+    process.exit 2
+
+  unless isVecAvailable()
+    process.stderr.write "Error: sqlite-vec extension failed to load on this platform.\n"
+    process.exit 1
+
+  unembedded := listUnembeddedDocs opts.source
+  if unembedded.length > 0
+    process.stderr.write `Warning: ${unembedded.length} cached doc(s) have no embeddings and will not match. Re-fetch with --fresh to embed:\n`
+    for doc of unembedded
+      process.stderr.write `  ${doc.url}\n`
+
+  _embedText := deps?.embedText ?? embedText
+  queryEmb := await _embedText query
+
+  // fetch more than topK to allow dedup-by-doc
+  rawHits := vectorSearch queryEmb, opts.topK * 4, opts.source
+
+  // dedupe: keep best chunk per doc_url
+  seen := new Set<string>()
+  hits: typeof rawHits .= []
+  for h of rawHits
+    if hits.length >= opts.topK then break
+    if seen.has h.url then continue
+    seen.add h.url
+    hits.push h
+
+  if opts.json
+    process.stdout.write JSON.stringify(hits) + "\n"
+    return
+
+  if hits.length is 0
+    process.stderr.write "No matches.\n"
+    return
+
+  for hit of hits
+    snippet := hit.chunk_text.split("\n").slice(0, 3).join(" ").slice 0, 160
+    process.stdout.write `${hit.url}\n  score: ${hit.score.toFixed 4}  ${snippet}\n`
