@@ -1,7 +1,8 @@
 { fetchDoc } from ./fetch.civet
-{ upsertDocument, linkDocumentToSource, getDocument, deleteVecChunks } from ./db.civet
+{ upsertDocument, linkDocumentToSource, getDocument } from ./db.civet
 { parseTTL, computeExpiresAt } from ./cache.civet
 { embedDocument, isEmbedEnabled } from ./embed.civet
+{ sha256Hex } from ./hash.civet
 
 LINK_PATTERN := /\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g
 
@@ -62,12 +63,6 @@ pool := async <T>(items: T[], concurrency: number, fn: (item: T) => Promise<void
       await fn current
   await Promise.all workers
 
-sha256Hex := async (s: string): Promise<string> =>
-  data := new TextEncoder().encode s
-  hashBuf := await crypto.subtle.digest "SHA-256", data
-  bytes := new Uint8Array hashBuf
-  Array.from(bytes).map((b) => b.toString(16).padStart 2, "0").join ""
-
 export fetchAndCacheLinks := async (
   links: string[],
   opts: { ttl: string, sourceUrl: string }
@@ -97,7 +92,7 @@ export fetchAndCacheLinks := async (
             etag: cached.etag
             last_modified: cached.last_modified
         return
-      newHash := await sha256Hex result.content
+      newHash := sha256Hex result.content
       contentChanged := not cached or cached.content_hash !== newHash
       upsertDocument
         url: url

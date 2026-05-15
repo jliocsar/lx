@@ -1,4 +1,4 @@
-{ insertVecChunk, deleteVecChunks, isVecAvailable } from ./db.civet
+{ bulkInsertVecChunks, deleteVecChunks, isVecAvailable } from ./db.civet
 { join } from node:path
 { homedir } from node:os
 
@@ -9,6 +9,7 @@ export isEmbedEnabled := (): boolean =>
   v is "1" or v is "true"
 
 embedderPromise: Promise<any> | null .= null
+ragModulePromise: Promise<any> | null .= null
 
 // Dynamic import keeps transformers.js (and onnxruntime-node) out of the eager load graph.
 // Standalone binary builds skip embedding via LX_EMBED_ENABLED; the binary never reaches this path.
@@ -22,6 +23,13 @@ loadEmbedder := async (): Promise<any> =>
     )()
   embedderPromise
 
+// Cache the @mastra/rag import — it has a non-trivial startup cost and the module
+// is referenced by every embedDocument call.
+loadRag := (): Promise<any> =>
+  unless ragModulePromise?
+    ragModulePromise = import "@mastra/rag"
+  ragModulePromise
+
 export interface MarkdownChunk
   text: string
   h1?: string
@@ -29,7 +37,7 @@ export interface MarkdownChunk
   h3?: string
 
 export chunkMarkdown := async (content: string): Promise<MarkdownChunk[]> =>
-  mod := await import "@mastra/rag"
+  mod := await loadRag()
   doc := mod.MDocument.fromMarkdown content
   chunks := await doc.chunk
     strategy: 'markdown'
@@ -39,18 +47,29 @@ export chunkMarkdown := async (content: string): Promise<MarkdownChunk[]> =>
       ['###', 'h3']
     ]
     stripHeaders: true
-  chunks
-    .map (c: any): MarkdownChunk =>
-      text: (c.text ?? "").trim()
-      h1: c.metadata?.h1
-      h2: c.metadata?.h2
-      h3: c.metadata?.h3
-    .filter (c: MarkdownChunk) => c.text.length > 0
+  out: MarkdownChunk[] := []
+  for c of chunks
+    text := (c.text ?? "").trim()
+    if text.length > 0
+      out.push { text, h1: c.metadata?.h1, h2: c.metadata?.h2, h3: c.metadata?.h3 }
+  out
 
 export embedText := async (text: string): Promise<Float32Array> =>
   pipe := await loadEmbedder()
   out := await pipe text, { pooling: "mean", normalize: true }
   out.data as Float32Array
+
+// Batch variant — transformers.js feature-extraction accepts string[] and returns
+// a single tensor with `.data` packed N × dim. One forward pass instead of N.
+embedBatch := async (texts: string[]): Promise<Float32Array[]> =>
+  unless texts.length then return []
+  pipe := await loadEmbedder()
+  out := await pipe texts, { pooling: "mean", normalize: true }
+  dim := (out.data.length / texts.length) | 0
+  result: Float32Array[] := new Array texts.length
+  for i .= 0; i < texts.length; i++
+    result[i] = (out.data as Float32Array).slice i * dim, (i + 1) * dim
+  result
 
 export interface EmbedDeps
   embedText?: typeof embedText
@@ -58,17 +77,33 @@ export interface EmbedDeps
 
 export embedDocument := async (url: string, content: string, deps?: EmbedDeps): Promise<void> =>
   unless isEmbedEnabled() and isVecAvailable() then return
-  _embedText := deps?.embedText ?? embedText
   _chunkMarkdown := deps?.chunkMarkdown ?? chunkMarkdown
   deleteVecChunks url
   chunks := await _chunkMarkdown content
   unless chunks.length then return
-  for chunk, idx of chunks
+
+  // Build input texts once and either batch (default) or fall back to the injected
+  // embedText (test path) to stay backwards-compatible with the existing test mocks.
+  inputs: string[] := new Array chunks.length
+  for i .= 0; i < chunks.length; i++
+    chunk := chunks[i]!
     headerPath := [chunk.h1, chunk.h2, chunk.h3].filter(Boolean).join " > "
-    inputText := if headerPath then `${headerPath}\n${chunk.text}` else chunk.text
-    embedding := await _embedText inputText
-    insertVecChunk
+    inputs[i] = if headerPath then `${headerPath}\n${chunk.text}` else chunk.text
+
+  embeddings: Float32Array[] := if deps?.embedText?
+    out: Float32Array[] := new Array chunks.length
+    for i .= 0; i < chunks.length; i++
+      out[i] = await deps.embedText! inputs[i]!
+    out
+  else
+    await embedBatch inputs
+
+  // Single transaction for all chunk inserts — N statement.run calls share one commit.
+  rows := new Array chunks.length
+  for i .= 0; i < chunks.length; i++
+    rows[i] =
       docUrl: url
-      chunkIdx: idx
-      chunkText: chunk.text
-      embedding: embedding
+      chunkIdx: i
+      chunkText: chunks[i]!.text
+      embedding: embeddings[i]!
+  bulkInsertVecChunks rows

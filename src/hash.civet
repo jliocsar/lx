@@ -1,0 +1,4 @@
+// Bun.CryptoHasher is sync, native, and skips the Uint8Array→hex JS round-trip
+// that crypto.subtle.digest + Array.from(...).map(toString(16)) was paying.
+export sha256Hex := (s: string): string =>
+  new Bun.CryptoHasher("sha256").update(s).digest "hex"

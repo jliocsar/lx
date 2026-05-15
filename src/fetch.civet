@@ -5,10 +5,15 @@ export interface FetchResult
 
 ACCEPTED_CONTENT_TYPES := ["text/markdown", "text/plain", "text/x-markdown"]
 
+// Frozen base so the per-call header object starts from a known monomorphic shape.
+// Cloned via Object.assign before mutation to keep the original immutable + avoid
+// leaking If-None-Match between concurrent fetches.
+BASE_HEADERS := Object.freeze
+  "Accept": "text/markdown, text/plain;q=0.9, */*;q=0.8"
+  "User-Agent": "lx/1.0"
+
 export fetchDoc := async (url: string, opts?: { etag?: string | null, lastModified?: string | null }): Promise<FetchResult | null> =>
-  headers: Record<string, string> :=
-    "Accept": "text/markdown, text/plain;q=0.9, */*;q=0.8"
-    "User-Agent": "lx/1.0"
+  headers: Record<string, string> := Object.assign {}, BASE_HEADERS
 
   if opts?.etag
     headers["If-None-Match"] = opts.etag
@@ -28,7 +33,11 @@ export fetchDoc := async (url: string, opts?: { etag?: string | null, lastModifi
   if contentType.includes "text/html"
     throw new Error `${url} returned HTML — expected markdown`
 
-  isMarkdown := ACCEPTED_CONTENT_TYPES.some (ct) => contentType.startsWith ct
+  isMarkdown .= false
+  for ct of ACCEPTED_CONTENT_TYPES
+    if contentType.startsWith ct
+      isMarkdown = true
+      break
 
   unless isMarkdown
     throw new Error `${url} returned unexpected content-type: ${contentType}`

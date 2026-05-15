@@ -21,7 +21,6 @@ db.exec """
   PRAGMA foreign_keys = ON;
 """
 
-// Try to load sqlite-vec; capture whether it succeeded so callers can gracefully degrade.
 vecAvailable .= false
 try
   sqliteVec.load db
@@ -95,35 +94,43 @@ if vecAvailable
     )
   """
 
-export interface Document
-  url: string
-  content: string
-  content_hash: string
-  fetched_at: number
-  expires_at: number | null
-  etag: string | null
-  last_modified: string | null
+// Concrete classes (not interfaces) so bun:sqlite `.as(Class)` produces rows
+// that all share a single V8 hidden class — monomorphic IC at every callsite.
+export class Document
+  url: string = ""
+  content: string = ""
+  content_hash: string = ""
+  fetched_at: number = 0
+  expires_at: number | null = null
+  etag: string | null = null
+  last_modified: string | null = null
 
-export interface DocumentSource
-  doc_url: string
-  source_url: string
+export class DocumentSource
+  doc_url: string = ""
+  source_url: string = ""
 
-export interface SearchHit
-  url: string
-  snippet: string
-  score: number
+export class SearchHit
+  url: string = ""
+  snippet: string = ""
+  score: number = 0
 
-export interface VectorHit
-  url: string
-  chunk_text: string
-  chunk_idx: number
-  score: number
+export class VectorHit
+  url: string = ""
+  chunk_text: string = ""
+  chunk_idx: number = 0
+  score: number = 0
 
-getDocStmt := db.prepare<Document, [string]> "SELECT * FROM documents WHERE url = ?"
+export class SourceSummary
+  source_url: string = ""
+  doc_count: number = 0
+  last_fetched: number = 0
 
-upsertDocStmt := db.prepare """
+getDocStmt := (db.prepare<Document, [string]> "SELECT url, content, content_hash, fetched_at, expires_at, etag, last_modified FROM documents WHERE url = ?").as Document
+
+// Positional params — no per-call object literal allocation, no named-binding lookups.
+upsertDocStmt := db.prepare<unknown, [string, string, string, number, number | null, string | null, string | null]> """
   INSERT INTO documents (url, content, content_hash, fetched_at, expires_at, etag, last_modified)
-  VALUES ($url, $content, $content_hash, $fetched_at, $expires_at, $etag, $last_modified)
+  VALUES (?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT(url) DO UPDATE SET
     content = excluded.content,
     content_hash = excluded.content_hash,
@@ -135,14 +142,14 @@ upsertDocStmt := db.prepare """
 
 deleteDocStmt := db.prepare "DELETE FROM documents WHERE url = ?"
 
-listDocsStmt := db.prepare<Document, []> "SELECT * FROM documents ORDER BY fetched_at DESC"
+listDocsStmt := (db.prepare<Document, []> "SELECT url, content, content_hash, fetched_at, expires_at, etag, last_modified FROM documents ORDER BY fetched_at DESC").as Document
 
-listDocsBySourceStmt := db.prepare<Document, [string]> """
-  SELECT d.* FROM documents d
+listDocsBySourceStmt := (db.prepare<Document, [string]> """
+  SELECT d.url, d.content, d.content_hash, d.fetched_at, d.expires_at, d.etag, d.last_modified FROM documents d
   JOIN document_sources ds ON ds.doc_url = d.url
   WHERE ds.source_url = ?
   ORDER BY d.fetched_at DESC
-"""
+""").as Document
 
 upsertSourceStmt := db.prepare """
   INSERT OR IGNORE INTO document_sources (doc_url, source_url) VALUES (?, ?)
@@ -150,7 +157,7 @@ upsertSourceStmt := db.prepare """
 
 clearSourcesForDocStmt := db.prepare "DELETE FROM document_sources WHERE doc_url = ?"
 
-listSourcesStmt := db.prepare<{source_url: string, doc_count: number, last_fetched: number}, []> """
+listSourcesStmt := (db.prepare<SourceSummary, []> """
   SELECT
     ds.source_url AS source_url,
     COUNT(*) AS doc_count,
@@ -159,21 +166,34 @@ listSourcesStmt := db.prepare<{source_url: string, doc_count: number, last_fetch
   JOIN documents d ON d.url = ds.doc_url
   GROUP BY ds.source_url
   ORDER BY last_fetched DESC
-"""
+""").as SourceSummary
 
 export getDocument := (url: string): Document | null =>
   getDocStmt.get url
 
-export upsertDocument := (doc: Omit<Document, "fetched_at"> & { fetched_at?: number }): void =>
-  now := Math.floor Date.now() / 1000
-  upsertDocStmt.run
-    $url: doc.url
-    $content: doc.content
-    $content_hash: doc.content_hash
-    $fetched_at: doc.fetched_at ?? now
-    $expires_at: doc.expires_at ?? null
-    $etag: doc.etag ?? null
-    $last_modified: doc.last_modified ?? null
+export interface UpsertInput
+  url: string
+  content: string
+  content_hash: string
+  fetched_at?: number
+  expires_at: number | null
+  etag: string | null
+  last_modified: string | null
+
+export upsertDocument := (doc: UpsertInput): void =>
+  fetchedAt := doc.fetched_at ?? Math.floor(Date.now() / 1000)
+  upsertDocStmt.run doc.url, doc.content, doc.content_hash, fetchedAt, doc.expires_at, doc.etag, doc.last_modified
+
+// Wraps a batch of upserts in a single transaction — collapses N fsyncs into 1.
+bulkUpsertTxn := db.transaction (rows: UpsertInput[]) =>
+  for row of rows
+    fetchedAt := row.fetched_at ?? Math.floor(Date.now() / 1000)
+    upsertDocStmt.run row.url, row.content, row.content_hash, fetchedAt, row.expires_at, row.etag, row.last_modified
+  return
+
+export bulkUpsertDocuments := (rows: UpsertInput[]): void =>
+  unless rows.length then return
+  bulkUpsertTxn rows
 
 export deleteDocument := (url: string): void =>
   deleteDocStmt.run url
@@ -188,15 +208,10 @@ export linkDocumentToSource := (docUrl: string, sourceUrl: string): void =>
 export clearSourcesForDocument := (docUrl: string): void =>
   clearSourcesForDocStmt.run docUrl
 
-export interface SourceSummary
-  source_url: string
-  doc_count: number
-  last_fetched: number
-
 export listSources := (): SourceSummary[] =>
   listSourcesStmt.all()
 
-searchFtsStmt := db.prepare<SearchHit, [string, number]> """
+searchFtsStmt := (db.prepare<SearchHit, [string, number]> """
   SELECT
     d.url AS url,
     snippet(documents_fts, 1, char(2), char(3), '…', 16) AS snippet,
@@ -206,9 +221,9 @@ searchFtsStmt := db.prepare<SearchHit, [string, number]> """
   WHERE documents_fts MATCH ?
   ORDER BY bm25(documents_fts)
   LIMIT ?
-"""
+""").as SearchHit
 
-searchFtsBySourceStmt := db.prepare<SearchHit, [string, string, number]> """
+searchFtsBySourceStmt := (db.prepare<SearchHit, [string, string, number]> """
   SELECT
     d.url AS url,
     snippet(documents_fts, 1, char(2), char(3), '…', 16) AS snippet,
@@ -219,74 +234,93 @@ searchFtsBySourceStmt := db.prepare<SearchHit, [string, string, number]> """
   WHERE documents_fts MATCH ? AND ds.source_url = ?
   ORDER BY bm25(documents_fts)
   LIMIT ?
-"""
+""").as SearchHit
 
 export searchFts := (query: string, limit: number, source?: string): SearchHit[] =>
   if source? then searchFtsBySourceStmt.all query, source, limit
   else searchFtsStmt.all query, limit
 
 deleteVecChunksStmt: { run: (docUrl: string) => void } | null .= null
-insertVecChunkStmt: { run: (params: {$doc_url: string, $chunk_idx: number, $chunk_text: string, $embedding: Uint8Array}) => void } | null .= null
+insertVecChunkStmt: { run: (docUrl: string, chunkIdx: number, chunkText: string, embedding: Uint8Array) => void } | null .= null
+bulkInsertVecChunksFn: ((rows: { docUrl: string, chunkIdx: number, chunkText: string, embedding: Uint8Array }[]) => void) | null .= null
+vectorSearchAllStmt: { all: (buf: Uint8Array, topK: number) => VectorHit[] } | null .= null
+vectorSearchBySourceStmt: { all: (buf: Uint8Array, topK: number, sourceUrl: string) => VectorHit[] } | null .= null
+
 if vecAvailable
   delStmt := db.prepare "DELETE FROM vec_chunks WHERE doc_url = ?"
   deleteVecChunksStmt = { run: (docUrl: string) => { delStmt.run docUrl; return } }
   insStmt := db.prepare """
     INSERT INTO vec_chunks (doc_url, chunk_idx, chunk_text, embedding)
-    VALUES ($doc_url, $chunk_idx, $chunk_text, $embedding)
+    VALUES (?, ?, ?, ?)
   """
-  insertVecChunkStmt = { run: (params) => { insStmt.run params; return } }
+  insertVecChunkStmt = { run: (docUrl, chunkIdx, chunkText, embedding) => { insStmt.run docUrl, chunkIdx, chunkText, embedding; return } }
+  bulkInsTxn := db.transaction (rows: { docUrl: string, chunkIdx: number, chunkText: string, embedding: Uint8Array }[]) =>
+    for r of rows
+      insStmt.run r.docUrl, r.chunkIdx, r.chunkText, r.embedding
+    return
+  bulkInsertVecChunksFn = bulkInsTxn
+
+  vAll := (db.prepare<VectorHit, [Uint8Array, number]> """
+    SELECT doc_url AS url, chunk_text, chunk_idx, distance AS score
+    FROM vec_chunks
+    WHERE embedding MATCH ? AND k = ?
+    ORDER BY distance
+  """).as VectorHit
+  vectorSearchAllStmt = { all: (buf, topK) => vAll.all buf, topK }
+
+  // json_each lets us scope to N doc_urls without re-preparing per call.
+  vBySrc := (db.prepare<VectorHit, [Uint8Array, number, string]> """
+    SELECT doc_url AS url, chunk_text, chunk_idx, distance AS score
+    FROM vec_chunks
+    WHERE embedding MATCH ? AND k = ?
+      AND doc_url IN (
+        SELECT doc_url FROM document_sources WHERE source_url = ?
+      )
+    ORDER BY distance
+  """).as VectorHit
+  vectorSearchBySourceStmt = { all: (buf, topK, sourceUrl) => vBySrc.all buf, topK, sourceUrl }
 
 export deleteVecChunks := (docUrl: string): void =>
   deleteVecChunksStmt?.run docUrl
 
 export insertVecChunk := (params: {docUrl: string, chunkIdx: number, chunkText: string, embedding: Float32Array}): void =>
   unless insertVecChunkStmt? then return
-  // sqlite-vec accepts Float32Array via BLOB; pass as Uint8Array view of underlying buffer
   buf := new Uint8Array params.embedding.buffer, params.embedding.byteOffset, params.embedding.byteLength
-  insertVecChunkStmt.run
-    $doc_url: params.docUrl
-    $chunk_idx: params.chunkIdx
-    $chunk_text: params.chunkText
-    $embedding: buf
+  insertVecChunkStmt.run params.docUrl, params.chunkIdx, params.chunkText, buf
+
+export bulkInsertVecChunks := (rows: { docUrl: string, chunkIdx: number, chunkText: string, embedding: Float32Array }[]): void =>
+  unless bulkInsertVecChunksFn? and rows.length then return
+  // Pre-materialize Uint8Array views once so the transaction loop stays allocation-light.
+  prepared := rows.map (r) => {
+    docUrl: r.docUrl
+    chunkIdx: r.chunkIdx
+    chunkText: r.chunkText
+    embedding: new Uint8Array r.embedding.buffer, r.embedding.byteOffset, r.embedding.byteLength
+  }
+  bulkInsertVecChunksFn prepared
 
 export vectorSearch := (queryEmbedding: Float32Array, topK: number, source?: string): VectorHit[] =>
   unless vecAvailable then return []
   buf := new Uint8Array queryEmbedding.buffer, queryEmbedding.byteOffset, queryEmbedding.byteLength
   if source?
-    docUrls := (db.prepare<{doc_url: string}, [string]>(
-      "SELECT doc_url FROM document_sources WHERE source_url = ?"
-    )).all(source).map .doc_url
-    if docUrls.length is 0 then return []
-    placeholders := docUrls.map(=> "?").join ","
-    stmt := db.prepare<VectorHit, any[]> `
-      SELECT doc_url AS url, chunk_text, chunk_idx, distance AS score
-      FROM vec_chunks
-      WHERE embedding MATCH ? AND k = ? AND doc_url IN (${placeholders})
-      ORDER BY distance
-    `
-    return stmt.all buf, topK, ...docUrls
-  stmt := db.prepare<VectorHit, [Uint8Array, number]> """
-    SELECT doc_url AS url, chunk_text, chunk_idx, distance AS score
-    FROM vec_chunks
-    WHERE embedding MATCH ? AND k = ?
-    ORDER BY distance
-  """
-  stmt.all buf, topK
+    vectorSearchBySourceStmt!.all buf, topK, source
+  else
+    vectorSearchAllStmt!.all buf, topK
 
 unembeddedDocsStmt: { all: () => Document[] } | null .= null
 unembeddedDocsBySourceStmt: { all: (source: string) => Document[] } | null .= null
 if vecAvailable
-  s1 := db.prepare<Document, []> """
-    SELECT d.* FROM documents d
+  s1 := (db.prepare<Document, []> """
+    SELECT d.url, d.content, d.content_hash, d.fetched_at, d.expires_at, d.etag, d.last_modified FROM documents d
     WHERE NOT EXISTS (SELECT 1 FROM vec_chunks vc WHERE vc.doc_url = d.url)
-  """
+  """).as Document
   unembeddedDocsStmt = { all: () => s1.all() }
-  s2 := db.prepare<Document, [string]> """
-    SELECT d.* FROM documents d
+  s2 := (db.prepare<Document, [string]> """
+    SELECT d.url, d.content, d.content_hash, d.fetched_at, d.expires_at, d.etag, d.last_modified FROM documents d
     JOIN document_sources ds ON ds.doc_url = d.url
     WHERE ds.source_url = ?
       AND NOT EXISTS (SELECT 1 FROM vec_chunks vc WHERE vc.doc_url = d.url)
-  """
+  """).as Document
   unembeddedDocsBySourceStmt = { all: (source: string) => s2.all source }
 
 export listUnembeddedDocs := (source?: string): Document[] =>

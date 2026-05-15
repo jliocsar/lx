@@ -12,15 +12,7 @@ stripMarkers := (s: string): string => s.replaceAll(SNIP_OPEN, "").replaceAll SN
 ensureCached := async (url: string): Promise<string> =>
   cached := getDocument url
   if cached then return cached.content
-  origStdout := process.stdout.write.bind process.stdout
-  origStderr := process.stderr.write.bind process.stderr
-  process.stdout.write = ((_: any) => true) as any
-  process.stderr.write = ((_: any) => true) as any
-  try
-    await runFetch url, { ttl: "7d", fresh: false }
-  finally
-    process.stdout.write = origStdout
-    process.stderr.write = origStderr
+  await runFetch url, { ttl: "7d", fresh: false, quiet: true }
   doc := getDocument url
   if doc then doc.content
   else throw new Error `failed to fetch ${url}`
