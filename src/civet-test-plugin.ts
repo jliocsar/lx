@@ -4,8 +4,7 @@
  * Compiles Civet to TypeScript with inline source maps for accurate coverage reporting.
  */
 import { plugin } from "bun"
-
-const { compile } = await import("@danielx/civet")
+import { compile } from "@danielx/civet"
 
 plugin({
   name: "Civet test loader",

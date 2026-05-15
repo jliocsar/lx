@@ -6,8 +6,9 @@
   "scripts": {
     "dev": "bun --preload @danielx/civet/bun-civet src/index.civet",
     "build": "bun run scripts/build.ts",
-    "test": "bun run scripts/compile-tests.ts && bun test src/; bun run scripts/cleanup-tests.ts",
-    "test:coverage": "bun run scripts/compile-tests.ts && bun test --coverage src/; bun run scripts/cleanup-tests.ts"
+    "test": "bun run scripts/compile-tests.ts && bun test src/",
+    "test:coverage": "bun run scripts/compile-tests.ts && bun test --coverage src/",
+    "test:clean": "bun run scripts/cleanup-tests.ts"
   },
   "devDependencies": {
     "@danielx/civet": "^0.11.7",
