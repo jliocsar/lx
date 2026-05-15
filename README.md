@@ -1,6 +1,6 @@
 # lx
 
-Blazingly fast markdown fetcher, cache, and search index for `llms.txt` corpora.
+Fast markdown fetcher, cache, and search index for `llms.txt` corpora.
 
 ## Install
 

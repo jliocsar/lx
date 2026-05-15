@@ -1,7 +1,5 @@
 # Roadmap
 
-> Captured 2026-05-03 from a brainstorm w/ Conan. The current project name is `kch` but will migrate back to **`lx`** — better fit, and the project is small enough that the rename cost is trivial.
-
 ## Core (already in / committed)
 
 - `lx <url>` / `lx fetch <url>` — fetch + cache (default command alias)
@@ -54,7 +52,6 @@ This is the killer flag. Agents pull docs from the local cache instead of hittin
 - **`lx export <url> [--format json|md|jsonl]`** — pipe-friendly for chains.
 - **`lx stats`** — coverage, staleness heatmap, top-fetched, total cache size.
 - **`lx prune`** / **`lx rm <url>`** — eviction.
-- **`lx ingest <llms.txt>`** — bridge into JC's KnowledgeBase vault: every cached doc becomes a `wiki/sources/` page. Reading list and second brain share substrate.
 
 ## Stack notes
 
@@ -70,14 +67,6 @@ This is the killer flag. Agents pull docs from the local cache instead of hittin
 - TTL default — 24h? 7d? Per-source override?
 - Audit layer — ship as opt-in flag, or always-on for fresh fetches with `audit: skip` config to disable?
 - MCP server lifecycle — long-running daemon, or ephemeral spawn-per-claude-session like parley adapters?
-
-## Naming
-
-- Current dir: `~/Projects/kch/`
-- Migrating back to: `~/Projects/lx/`
-- Binary: `lx`
-- Cache dir: `~/.lx/`
-- Repo (when public): `github.com/jliocsar/lx`
 
 ## Why this exists
 

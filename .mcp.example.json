@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "lx": {
+      "command": "lx",
+      "args": ["mcp"],
+      "env": {
+        "LX_EMBED_ENABLED": "1"
+      }
+    }
+  }
+}
