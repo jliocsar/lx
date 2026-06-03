@@ -38,14 +38,12 @@ describe 'fetch', =>
     test 'invalid URL → exit 2', async =>
       await expect(runFetch 'not-a-url', opts).rejects.toThrow 'exit:2'
 
-    test 'http:// → exit 2', async =>
-      await expect(runFetch 'http://example.com/doc.md', opts).rejects.toThrow 'exit:2'
+    test 'non-http protocol → exit 2', async =>
+      await expect(runFetch 'file:///etc/passwd', opts).rejects.toThrow 'exit:2'
 
-    test '.txt not llms.txt → exit 2', async =>
-      await expect(runFetch 'https://example.com/other.txt', opts).rejects.toThrow 'exit:2'
-
-    test 'unsupported extension → exit 2', async =>
-      await expect(runFetch 'https://example.com/doc.pdf', opts).rejects.toThrow 'exit:2'
+    test 'http:// accepted', async =>
+      await runFetch 'http://localhost:3000/doc.md', opts
+      expect(stdoutOutput).toContain '# Fetched'
 
     test 'valid .md URL accepted', async =>
       await runFetch 'https://example.com/doc.md', opts
@@ -59,6 +57,47 @@ describe 'fetch', =>
       globalThis.fetch = async () => markdownRes '# T\n\n## Docs\n'
       await runFetch 'https://example.com/llms.txt', opts
       expect(stdoutOutput).toContain '# T'
+
+  describe 'llms-full.txt', =>
+    test 'cached as single doc, not crawled', async =>
+      globalThis.fetch = async () =>
+        markdownRes '# Full\n\n## Docs\n\n- [A](https://child.com/a.md)'
+      await runFetch 'https://example.com/llms-full.txt', opts
+      expect(stdoutOutput).toContain '# Full'
+      expect(getDocument 'https://example.com/llms-full.txt').not.toBeNull()
+      expect(getDocument 'https://child.com/a.md').toBeNull()
+
+  describe 'arbitrary URL fallback', =>
+    test 'accept-header strategy wins → stored under original url', async =>
+      globalThis.fetch = async () => markdownRes '# Ref'
+      await runFetch 'https://bun.sh/docs/some-reference', opts
+      expect(stdoutOutput).toContain '# Ref'
+      doc := getDocument 'https://bun.sh/docs/some-reference'
+      expect(doc).not.toBeNull()
+      expect(doc?.resolved_url).toBeNull()
+
+    test 'falls through HTML to .md-suffix probe → records resolved_url', async =>
+      globalThis.fetch = async (url: string) =>
+        if url.endsWith '.md'
+          markdownRes '# From md'
+        else
+          new Response '<!doctype html><html></html>',
+            status: 200
+            headers: { 'content-type': 'text/html' }
+      await runFetch 'https://bun.sh/docs/some-reference', opts
+      expect(stdoutOutput).toContain '# From md'
+      doc := getDocument 'https://bun.sh/docs/some-reference'
+      expect(doc?.resolved_url).toBe 'https://bun.sh/docs/some-reference.md'
+
+    test 'all strategies fail → exit 1 with enumerated error', async =>
+      globalThis.fetch = async () =>
+        new Response '<html></html>',
+          status: 200
+          headers: { 'content-type': 'text/html' }
+      await expect(runFetch 'https://bun.sh/docs/some-reference', opts).rejects.toThrow 'exit:1'
+      expect(stderrOutput).toContain 'could not retrieve markdown'
+      expect(stderrOutput).toContain 'accept-header'
+      expect(stderrOutput).toContain 'md-suffix'
 
   describe 'cache hit', =>
     test 'returns cached content without fetching', async =>

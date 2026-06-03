@@ -10,7 +10,8 @@ HELP := """
   lx — blazingly fast markdown fetcher, cache, and searchable corpus
 
   Usage:
-    lx fetch <url> [options]   fetch and cache a markdown doc or llms.txt
+    lx fetch <url> [options]   fetch and cache markdown (llms.txt, llms-full.txt,
+                               a .md/.mdx, or any URL via content negotiation)
     lx list [--source <url>]   list cached documents
     lx sources                 list crawled llms.txt sources
     lx search <query> [...]    full-text search (FTS5) across the cache

@@ -1,5 +1,5 @@
 { getDocument, upsertDocument, deleteDocument, deleteVecChunks, clearSourcesForDocument } from ../db.civet
-{ fetchDoc } from ../fetch.civet
+{ fetchDoc, fetchWithStrategies, type FetchResult } from ../fetch.civet
 { parseLlmsTxt, fetchAndCacheLinks } from ../crawl.civet
 { parseTTL, computeExpiresAt, isExpired } from ../cache.civet
 { embedDocument, isEmbedEnabled } from ../embed.civet
@@ -18,21 +18,20 @@ validateUrl := (raw: string): URL =>
 
   url := new URL raw
 
-  unless url.protocol is "https:"
-    process.stderr.write "Error: URL must use HTTPS\n"
-    process.exit 2
-
-  { pathname } := url
-
-  if pathname.endsWith ".txt"
-    unless pathname.endsWith "/llms.txt"
-      process.stderr.write "Error: .txt URL must be llms.txt\n"
-      process.exit 2
-  else unless pathname.endsWith(".md") or pathname.endsWith(".mdx")
-    process.stderr.write "Error: URL must end in .txt (llms.txt), .md, or .mdx\n"
+  unless url.protocol is "https:" or url.protocol is "http:"
+    process.stderr.write "Error: URL must use http or https\n"
     process.exit 2
 
   url
+
+// A direct route fetches one known markdown resource: llms.txt (crawled), llms-full.txt
+// (single dump), or an explicit .md/.mdx. Everything else is an arbitrary URL routed
+// through the fallback chain.
+isDirectRoute := (pathname: string): boolean =>
+  pathname.endsWith("/llms.txt") or
+  pathname.endsWith("/llms-full.txt") or
+  pathname.endsWith(".md") or
+  pathname.endsWith(".mdx")
 
 applyRange := (content: string, range: string): string =>
   match := range.match /^(\d+):(\d+)$/
@@ -73,9 +72,26 @@ export runFetch := async (raw: string, opts: FetchOptions): Promise<void> =>
   now := Math.floor Date.now() / 1000
   expiresAt := computeExpiresAt now, ttlSeconds
 
-  result := await fetchDoc urlStr,
-    etag: cached?.etag
-    lastModified: cached?.last_modified
+  result: FetchResult | null .= null
+  resolvedUrl: string | null .= cached?.resolved_url ?? null
+
+  if cached
+    // Revalidation — we already know where this content lives. One conditional request
+    // against resolved_url (or the key when no redirect happened); never re-run the chain.
+    result = await fetchDoc (cached.resolved_url ?? urlStr),
+      etag: cached.etag
+      lastModified: cached.last_modified
+  else if isDirectRoute url.pathname
+    result = await fetchDoc urlStr
+  else
+    // Arbitrary URL, first acquisition → run the fallback chain.
+    try
+      strategy := await fetchWithStrategies urlStr
+      result = strategy.result
+      resolvedUrl = strategy.resolvedUrl
+    catch err
+      process.stderr.write `Error: ${(err as Error).message}\n`
+      process.exit 1
 
   if not result and cached
     upsertDocument
@@ -86,6 +102,7 @@ export runFetch := async (raw: string, opts: FetchOptions): Promise<void> =>
       expires_at: expiresAt
       etag: cached.etag
       last_modified: cached.last_modified
+      resolved_url: cached.resolved_url
     writeOutput cached.content, opts.range, quiet
     return
 
@@ -104,6 +121,7 @@ export runFetch := async (raw: string, opts: FetchOptions): Promise<void> =>
     expires_at: expiresAt
     etag: result.etag
     last_modified: result.lastModified
+    resolved_url: resolvedUrl
 
   if url.pathname.endsWith "/llms.txt"
     try

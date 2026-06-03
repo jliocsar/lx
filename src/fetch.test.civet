@@ -1,5 +1,5 @@
 { test, expect, describe, afterEach } from bun:test
-{ fetchDoc } from ./fetch.civet
+{ fetchDoc, looksLikeHtml } from ./fetch.civet
 
 describe 'fetch', =>
   originalFetch .= globalThis.fetch
@@ -29,6 +29,20 @@ describe 'fetch', =>
   test 'unknown content-type → throws', async =>
     globalThis.fetch = async () => makeMockRes '{}', 200, 'application/json'
     await expect(fetchDoc 'https://example.com/doc.md').rejects.toThrow 'content-type'
+
+  test 'HTML body under markdown content-type → throws', async =>
+    globalThis.fetch = async () => makeMockRes '<!doctype html><html></html>', 200, 'text/plain'
+    await expect(fetchDoc 'https://example.com/doc.md').rejects.toThrow 'HTML body'
+
+  describe 'looksLikeHtml', =>
+    test 'detects leading doctype', =>
+      expect(looksLikeHtml '<!DOCTYPE html><html>').toBe true
+    test 'detects leading html tag with leading whitespace', =>
+      expect(looksLikeHtml '\n  <html lang="en">').toBe true
+    test 'markdown with inline html block is not flagged', =>
+      expect(looksLikeHtml '# Title\n\nUse <div> like this.').toBe false
+    test 'plain markdown is not flagged', =>
+      expect(looksLikeHtml '# Hello\n\nworld').toBe false
 
   test '304 → null', async =>
     globalThis.fetch = async () => new Response null, { status: 304 }

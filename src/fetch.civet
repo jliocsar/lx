@@ -5,6 +5,14 @@ export interface FetchResult
 
 ACCEPTED_CONTENT_TYPES := ["text/markdown", "text/plain", "text/x-markdown"]
 
+// A liar content-type (e.g. text/plain) can still carry an HTML page. Markdown docs
+// effectively never open with these markers, so a leading-marker test is cheap and
+// false-positive-free — far safer than a tag-density heuristic on docs full of inline HTML.
+HTML_LEADING := /^\s*<(?:!doctype html|html)\b/i
+
+export looksLikeHtml := (content: string): boolean =>
+  HTML_LEADING.test content
+
 // Frozen base so the per-call header object starts from a known monomorphic shape.
 // Cloned via Object.assign before mutation to keep the original immutable + avoid
 // leaking If-None-Match between concurrent fetches.
@@ -44,8 +52,65 @@ export fetchDoc := async (url: string, opts?: { etag?: string | null, lastModifi
 
   content := await res.text()
 
+  if looksLikeHtml content
+    throw new Error `${url} returned an HTML body — expected markdown`
+
   {
     content
     etag: res.headers.get "etag"
     lastModified: res.headers.get "last-modified"
   }
+
+export interface StrategyResult
+  result: FetchResult
+  resolvedUrl: string | null
+
+mdSuffixUrl := (url: URL): string | null =>
+  { pathname } := url
+  if pathname is "" or pathname is "/"
+    return null
+  if pathname.endsWith(".md") or pathname.endsWith(".mdx")
+    return null
+  trimmed := if pathname.endsWith "/" then pathname.slice 0, -1 else pathname
+  if trimmed is ""
+    return null
+  candidate := new URL url.toString()
+  candidate.pathname = trimmed + ".md"
+  candidate.hash = ""
+  candidate.toString()
+
+formatFailure := (url: string, attempts: { label: string, url: string, reason: string }[]): string =>
+  lines := [`could not retrieve markdown from ${url}`]
+  for attempt of attempts
+    lines.push `  tried [${attempt.label}]: ${attempt.url} → ${attempt.reason}`
+  lines.push "No strategy returned markdown/mdx content."
+  lines.join "\n"
+
+// Fallback chain for arbitrary (non-llms.txt / non-.md) URLs. Tries the raw URL with
+// Accept negotiation first, then a `.md` suffix probe. fetchDoc throws on HTML / wrong
+// content-type, so a throw means "fall through to the next strategy". When the chain is
+// exhausted, throws an enumerated error so the calling agent knows exactly what failed.
+// First-acquisition only — revalidation hits resolved_url directly and skips this.
+export fetchWithStrategies := async (rawUrl: string): Promise<StrategyResult> =>
+  url := new URL rawUrl
+  attempts: { label: string, url: string, reason: string }[] .= []
+
+  try
+    result := await fetchDoc rawUrl
+    if result
+      return { result, resolvedUrl: null }
+    attempts.push { label: "accept-header", url: rawUrl, reason: "no content returned" }
+  catch err
+    attempts.push { label: "accept-header", url: rawUrl, reason: (err as Error).message }
+
+  mdUrl := mdSuffixUrl url
+  if mdUrl
+    try
+      result := await fetchDoc mdUrl
+      if result
+        return { result, resolvedUrl: mdUrl }
+      attempts.push { label: "md-suffix", url: mdUrl, reason: "no content returned" }
+    catch err
+      attempts.push { label: "md-suffix", url: mdUrl, reason: (err as Error).message }
+
+  throw new Error formatFailure rawUrl, attempts

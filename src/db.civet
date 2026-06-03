@@ -6,7 +6,7 @@
 
 export CACHE_DIR := join homedir(), ".cache", "lx"
 DB_PATH := process.env.LX_DB_PATH ?? join(CACHE_DIR, "cache.db")
-SCHEMA_VERSION := 1
+SCHEMA_VERSION := 2
 
 mkdirSync CACHE_DIR, { recursive: true }
 
@@ -50,7 +50,8 @@ db.exec """
     fetched_at    INTEGER NOT NULL,
     expires_at    INTEGER,
     etag          TEXT,
-    last_modified TEXT
+    last_modified TEXT,
+    resolved_url  TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_documents_expires ON documents(expires_at)
     WHERE expires_at IS NOT NULL;
@@ -104,6 +105,7 @@ export class Document
   expires_at: number | null = null
   etag: string | null = null
   last_modified: string | null = null
+  resolved_url: string | null = null
 
 export class DocumentSource
   doc_url: string = ""
@@ -125,27 +127,28 @@ export class SourceSummary
   doc_count: number = 0
   last_fetched: number = 0
 
-getDocStmt := (db.prepare<Document, [string]> "SELECT url, content, content_hash, fetched_at, expires_at, etag, last_modified FROM documents WHERE url = ?").as Document
+getDocStmt := (db.prepare<Document, [string]> "SELECT url, content, content_hash, fetched_at, expires_at, etag, last_modified, resolved_url FROM documents WHERE url = ?").as Document
 
 // Positional params — no per-call object literal allocation, no named-binding lookups.
-upsertDocStmt := db.prepare<unknown, [string, string, string, number, number | null, string | null, string | null]> """
-  INSERT INTO documents (url, content, content_hash, fetched_at, expires_at, etag, last_modified)
-  VALUES (?, ?, ?, ?, ?, ?, ?)
+upsertDocStmt := db.prepare<unknown, [string, string, string, number, number | null, string | null, string | null, string | null]> """
+  INSERT INTO documents (url, content, content_hash, fetched_at, expires_at, etag, last_modified, resolved_url)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT(url) DO UPDATE SET
     content = excluded.content,
     content_hash = excluded.content_hash,
     fetched_at = excluded.fetched_at,
     expires_at = excluded.expires_at,
     etag = excluded.etag,
-    last_modified = excluded.last_modified
+    last_modified = excluded.last_modified,
+    resolved_url = excluded.resolved_url
 """
 
 deleteDocStmt := db.prepare "DELETE FROM documents WHERE url = ?"
 
-listDocsStmt := (db.prepare<Document, []> "SELECT url, content, content_hash, fetched_at, expires_at, etag, last_modified FROM documents ORDER BY fetched_at DESC").as Document
+listDocsStmt := (db.prepare<Document, []> "SELECT url, content, content_hash, fetched_at, expires_at, etag, last_modified, resolved_url FROM documents ORDER BY fetched_at DESC").as Document
 
 listDocsBySourceStmt := (db.prepare<Document, [string]> """
-  SELECT d.url, d.content, d.content_hash, d.fetched_at, d.expires_at, d.etag, d.last_modified FROM documents d
+  SELECT d.url, d.content, d.content_hash, d.fetched_at, d.expires_at, d.etag, d.last_modified, d.resolved_url FROM documents d
   JOIN document_sources ds ON ds.doc_url = d.url
   WHERE ds.source_url = ?
   ORDER BY d.fetched_at DESC
@@ -179,16 +182,17 @@ export interface UpsertInput
   expires_at: number | null
   etag: string | null
   last_modified: string | null
+  resolved_url?: string | null
 
 export upsertDocument := (doc: UpsertInput): void =>
   fetchedAt := doc.fetched_at ?? Math.floor(Date.now() / 1000)
-  upsertDocStmt.run doc.url, doc.content, doc.content_hash, fetchedAt, doc.expires_at, doc.etag, doc.last_modified
+  upsertDocStmt.run doc.url, doc.content, doc.content_hash, fetchedAt, doc.expires_at, doc.etag, doc.last_modified, doc.resolved_url ?? null
 
 // Wraps a batch of upserts in a single transaction — collapses N fsyncs into 1.
 bulkUpsertTxn := db.transaction (rows: UpsertInput[]) =>
   for row of rows
     fetchedAt := row.fetched_at ?? Math.floor(Date.now() / 1000)
-    upsertDocStmt.run row.url, row.content, row.content_hash, fetchedAt, row.expires_at, row.etag, row.last_modified
+    upsertDocStmt.run row.url, row.content, row.content_hash, fetchedAt, row.expires_at, row.etag, row.last_modified, row.resolved_url ?? null
   return
 
 export bulkUpsertDocuments := (rows: UpsertInput[]): void =>
@@ -311,12 +315,12 @@ unembeddedDocsStmt: { all: () => Document[] } | null .= null
 unembeddedDocsBySourceStmt: { all: (source: string) => Document[] } | null .= null
 if vecAvailable
   s1 := (db.prepare<Document, []> """
-    SELECT d.url, d.content, d.content_hash, d.fetched_at, d.expires_at, d.etag, d.last_modified FROM documents d
+    SELECT d.url, d.content, d.content_hash, d.fetched_at, d.expires_at, d.etag, d.last_modified, d.resolved_url FROM documents d
     WHERE NOT EXISTS (SELECT 1 FROM vec_chunks vc WHERE vc.doc_url = d.url)
   """).as Document
   unembeddedDocsStmt = { all: () => s1.all() }
   s2 := (db.prepare<Document, [string]> """
-    SELECT d.url, d.content, d.content_hash, d.fetched_at, d.expires_at, d.etag, d.last_modified FROM documents d
+    SELECT d.url, d.content, d.content_hash, d.fetched_at, d.expires_at, d.etag, d.last_modified, d.resolved_url FROM documents d
     JOIN document_sources ds ON ds.doc_url = d.url
     WHERE ds.source_url = ?
       AND NOT EXISTS (SELECT 1 FROM vec_chunks vc WHERE vc.doc_url = d.url)
