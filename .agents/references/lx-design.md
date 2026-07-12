@@ -61,6 +61,8 @@ src/
 5. If `LX_EMBED_ENABLED` and content hash changed: chunk + embed → `vec_chunks`
 6. Output llms.txt content
 
+`llms-full.txt` URL: fetch → hash → cache as one document → output a heading summary by default. Use `--verbose` to print the full fetched content. `--range` prints the requested source-content line slice, not the generated summary.
+
 `.md` / `.mdx` URL: fetch → hash → cache → optionally embed → output.
 
 Content-type validation: `text/html` → reject; `text/markdown`/`text/plain`/`text/x-markdown` → accept; else → reject.
@@ -76,7 +78,7 @@ Content-type validation: `text/html` → reject; `text/markdown`/`text/plain`/`t
 ## CLI
 
 ```
-lx fetch <url> [--ttl 7d] [--fresh] [--range start:end]
+lx fetch <url> [--ttl 7d] [--fresh] [--range start:end] [--verbose]
 lx list [--source <url>]
 lx sources
 lx search <query> [--source <url>] [--limit 10] [--json]

@@ -23,6 +23,7 @@ HELP := """
     --ttl <value>          cache TTL (e.g. 7d, 24h, 30m, 2w) [default: 7d]
     --fresh                bust cache for this URL and refetch
     --range <start:end>    return only lines start–end (1-indexed, inclusive)
+    --verbose              print full llms-full.txt content instead of summary
 
   search / vector options:
     --source <url>         filter to a specific llms.txt source
@@ -68,6 +69,7 @@ export main := async (argv: string[], deps?: MainDeps): Promise<void> =>
           ttl: { type: "string" }
           fresh: { type: "boolean", default: false }
           range: { type: "string" }
+          verbose: { type: "boolean", default: false }
         allowPositionals: true
       [url] := positionals
       unless url
@@ -77,6 +79,7 @@ export main := async (argv: string[], deps?: MainDeps): Promise<void> =>
         ttl: values.ttl ?? "7d"
         fresh: values.fresh ?? false
         range: values.range
+        verbose: values.verbose ?? false
       process.exit 0
 
     when "list"

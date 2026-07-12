@@ -12,6 +12,7 @@ bun install
 
 ```bash
 bun run dev fetch https://bun.sh/llms.txt    # fetch & cache (also crawls llms.txt links)
+bun run dev fetch https://bun.sh/llms-full.txt --verbose  # print full llms-full.txt content
 bun run dev list                              # list cached docs
 bun run dev sources                           # list crawled llms.txt sources
 bun run dev search "websocket"                # full-text search across cache

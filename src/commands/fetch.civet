@@ -10,6 +10,7 @@ export interface FetchOptions
   fresh: boolean
   range?: string
   quiet?: boolean
+  verbose?: boolean
 
 validateUrl := (raw: string): URL =>
   unless URL.canParse raw
@@ -33,6 +34,9 @@ isDirectRoute := (pathname: string): boolean =>
   pathname.endsWith(".md") or
   pathname.endsWith(".mdx")
 
+isLlmsFullRoute := (pathname: string): boolean =>
+  pathname.endsWith "/llms-full.txt"
+
 applyRange := (content: string, range: string): string =>
   match := range.match /^(\d+):(\d+)$/
   unless match
@@ -45,9 +49,60 @@ applyRange := (content: string, range: string): string =>
 
   content.split("\n").slice(start - 1, end).join "\n"
 
-writeOutput := (content: string, range: string | undefined, quiet: boolean): void =>
+contentLines := (content: string): string[] =>
+  lines := content.split "\n"
+  if lines.length > 0 and lines[lines.length - 1] is ""
+    lines.pop()
+  lines
+
+csvQuote := (value: string): string =>
+  `"${value.replace(/"/g, '""')}"`
+
+formatLineRange := (start: number, end: number): string =>
+  if start is end then `${start}` else `${start}:${end}`
+
+summarizeLlmsFull := (url: string, content: string): string =>
+  lines := contentLines content
+  headings: { level: number, title: string, line: number }[] .= []
+  fenceChar: string | null .= null
+
+  for line, idx of lines
+    trimmedStart := line.trimStart()
+    if fenceChar?
+      if trimmedStart.startsWith fenceChar.repeat 3
+        fenceChar = null
+      continue
+
+    if trimmedStart.startsWith "```"
+      fenceChar = "`"
+      continue
+    if trimmedStart.startsWith "~~~"
+      fenceChar = "~"
+      continue
+
+    match := line.match /^(#{1,3})(?!#)\s+(.+?)\s*$/
+    if match
+      level := match[1]!.length
+      title := match[2]!.replace(/\s+#+\s*$/, "").trim()
+      if title
+        headings.push { level, title, line: idx + 1 }
+
+  out := [`${url}`, `line count: ${lines.length}`, "", "level,title,line range"]
+  for heading, idx of headings
+    next := headings[idx + 1]
+    endLine := (next?.line ?? (lines.length + 1)) - 1
+    out.push `${heading.level},${csvQuote heading.title},${formatLineRange heading.line, endLine}`
+  out.join "\n"
+
+writeOutput := (url: URL, content: string, opts: FetchOptions, quiet: boolean): void =>
   if quiet then return
-  out := if range? then applyRange content, range else content
+  out :=
+    if isLlmsFullRoute(url.pathname) and not opts.verbose and not opts.range
+      summarizeLlmsFull url.toString(), content
+    else if opts.range?
+      applyRange content, opts.range
+    else
+      content
   process.stdout.write out
   unless out.endsWith "\n"
     process.stdout.write "\n"
@@ -65,7 +120,7 @@ export runFetch := async (raw: string, opts: FetchOptions): Promise<void> =>
   cached := getDocument urlStr
 
   if cached and not isExpired cached
-    writeOutput cached.content, opts.range, quiet
+    writeOutput url, cached.content, opts, quiet
     return
 
   ttlSeconds := parseTTL opts.ttl
@@ -103,7 +158,7 @@ export runFetch := async (raw: string, opts: FetchOptions): Promise<void> =>
       etag: cached.etag
       last_modified: cached.last_modified
       resolved_url: cached.resolved_url
-    writeOutput cached.content, opts.range, quiet
+    writeOutput url, cached.content, opts, quiet
     return
 
   unless result
@@ -136,4 +191,4 @@ export runFetch := async (raw: string, opts: FetchOptions): Promise<void> =>
     catch err
       process.stderr.write `Warning: embed failed for ${urlStr}: ${(err as Error).message}\n`
 
-  writeOutput result.content, opts.range, quiet
+  writeOutput url, result.content, opts, quiet

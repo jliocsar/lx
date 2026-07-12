@@ -83,6 +83,11 @@ describe 'index', =>
     expect(mockRunFetch).toHaveBeenCalledWith expect.anything(),
       expect.objectContaining { range: '1:5' }
 
+  test 'fetch --verbose forwarded', async =>
+    await expect(main ['fetch', 'https://x.com/llms-full.txt', '--verbose'], deps).rejects.toThrow 'exit:0'
+    expect(mockRunFetch).toHaveBeenCalledWith expect.anything(),
+      expect.objectContaining { verbose: true }
+
   test 'list → calls runList and exits 0', async =>
     await expect(main ['list'], deps).rejects.toThrow 'exit:0'
     expect(mockRunList).toHaveBeenCalledTimes 1

@@ -63,9 +63,37 @@ describe 'fetch', =>
       globalThis.fetch = async () =>
         markdownRes '# Full\n\n## Docs\n\n- [A](https://child.com/a.md)'
       await runFetch 'https://example.com/llms-full.txt', opts
-      expect(stdoutOutput).toContain '# Full'
+      expect(stdoutOutput).toContain 'https://example.com/llms-full.txt'
+      expect(stdoutOutput).toContain 'line count: 5'
+      expect(stdoutOutput).toContain 'level,title,line range'
+      expect(stdoutOutput).toContain '1,"Full",1:2'
+      expect(stdoutOutput).toContain '2,"Docs",3:5'
       expect(getDocument 'https://example.com/llms-full.txt').not.toBeNull()
       expect(getDocument 'https://child.com/a.md').toBeNull()
+
+    test 'summary emits headings in order with CSV-quoted titles', async =>
+      globalThis.fetch = async () =>
+        markdownRes '# Title\nintro\n## Another Title\nbody\n### Nested, with "quote"\nchild\n## Same Level\nlast\n'
+      await runFetch 'https://example.com/llms-full.txt', opts
+      expect(stdoutOutput).toBe 'https://example.com/llms-full.txt\nline count: 8\n\nlevel,title,line range\n1,"Title",1:2\n2,"Another Title",3:4\n3,"Nested, with ""quote""",5:6\n2,"Same Level",7:8\n'
+
+    test 'summary strips closing heading hashes and ignores fenced code headings', async =>
+      globalThis.fetch = async () =>
+        markdownRes '## Title ##\n```text\n# Ignored\n```\n### Next ###'
+      await runFetch 'https://example.com/llms-full.txt', opts
+      expect(stdoutOutput).toContain '2,"Title",1:4'
+      expect(stdoutOutput).toContain '3,"Next",5'
+      expect(stdoutOutput).not.toContain 'Ignored'
+
+    test '--verbose prints full content', async =>
+      globalThis.fetch = async () => markdownRes '# Full\n\n## Docs\n'
+      await runFetch 'https://example.com/llms-full.txt', { ttl: '7d', fresh: false, verbose: true }
+      expect(stdoutOutput).toBe '# Full\n\n## Docs\n'
+
+    test '--range prints full content slice instead of summary', async =>
+      globalThis.fetch = async () => markdownRes '# Full\nline2\nline3\n'
+      await runFetch 'https://example.com/llms-full.txt', { ttl: '7d', fresh: false, range: '2:3' }
+      expect(stdoutOutput).toBe 'line2\nline3\n'
 
   describe 'arbitrary URL fallback', =>
     test 'accept-header strategy wins → stored under original url', async =>
