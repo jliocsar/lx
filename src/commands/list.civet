@@ -1,4 +1,4 @@
-{ listDocumentsPage, countDocuments, listRootDocuments, countRootDocuments, listAllChildren, listSources } from ../db.civet
+{ listDocumentsPage, countDocuments, listRootDocuments, countRootDocuments, listAllChildren } from ../db.civet
 
 formatDate := (ts: number): string =>
   new Date(ts * 1000).toISOString().slice 0, 19
@@ -20,8 +20,8 @@ export interface ListOptions
   limit?: number
   offset?: number
 
-renderDoc := (url: string, fetchedAt: number, expiresAt: number | null, suffix: string): string =>
-  `${url}\n  fetched: ${formatDate fetchedAt}  ttl: ${formatTTL expiresAt}${suffix}\n`
+renderDoc := (url: string, fetchedAt: number, expiresAt: number | null): string =>
+  `${url}\n  fetched: ${formatDate fetchedAt}  ttl: ${formatTTL expiresAt}\n`
 
 writeFooter := (offset: number, shown: number, total: number, limit: number, opts?: ListOptions): void =>
   shownEnd := offset + shown
@@ -53,7 +53,7 @@ export runList := (opts?: ListOptions): void =>
       process.stderr.write `No documents at offset ${offset} (source holds ${total}). Try a smaller --offset.\n`
       return
     for doc of docs
-      process.stdout.write renderDoc doc.url, doc.fetched_at, doc.expires_at, ""
+      process.stdout.write renderDoc doc.url, doc.fetched_at, doc.expires_at
     writeFooter offset, docs.length, total, limit, opts
     return
 
@@ -80,11 +80,7 @@ export runList := (opts?: ListOptions): void =>
       for childUrl of childrenBySource.get(root.url) ?? []
         process.stdout.write `    ${childUrl}\n`
   else
-    // Annotate roots that have crawled children so the reader knows --all reveals more.
-    childCounts := new Map(listSources().map (s) => [s.source_url, s.doc_count])
     for root of roots
-      count := childCounts.get(root.url) ?? 0
-      suffix := if count > 0 then `  ·  ${count} crawled doc(s) — see: lx list --all` else ""
-      process.stdout.write renderDoc root.url, root.fetched_at, root.expires_at, suffix
+      process.stdout.write renderDoc root.url, root.fetched_at, root.expires_at
 
   writeFooter offset, roots.length, total, limit, opts

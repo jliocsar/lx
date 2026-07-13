@@ -128,11 +128,6 @@ describe 'list', =>
       expect(stdoutOutput).not.toContain 'getting-started.md'
       expect(stdoutOutput).not.toContain 'docs/api.md'
 
-    test 'default annotates roots with a crawled-doc count', =>
-      seedTree()
-      runList()
-      expect(stdoutOutput).toContain '2 crawled doc(s)'
-
     test '--all nests children under their root, indented', =>
       seedTree()
       runList { all: true }
