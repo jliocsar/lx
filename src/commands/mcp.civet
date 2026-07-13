@@ -22,7 +22,7 @@ applyRange := (content: string, range?: {start: number, end: number}): string =>
   content.split("\n").slice(range.start - 1, range.end).join "\n"
 
 fetchDocConfig := {
-  description: "Fetch a markdown document from the lx cache. Fetches and caches on miss. Returns full content unless `range` is provided.",
+  description: "Fetch a markdown doc or llms.txt from the lx cache; fetches + caches on miss. Prefer this over a generic web fetch for llms.txt / .md docs. Fetching an llms.txt URL auto-crawls and indexes every linked page, populating search_docs and list_docs in one call. Use `range` to page through large docs instead of pulling the whole file.",
   inputSchema: {
     url: z.string().describe("URL of the markdown document or llms.txt"),
     range: z.object({
@@ -33,32 +33,33 @@ fetchDocConfig := {
 }
 
 searchDocsConfig := {
-  description: "Full-text search across cached docs (FTS5 with porter stemming). Returns top matches with snippet + score.",
+  description: "Keyword/full-text search over already-cached docs (SQLite FTS5, porter stemming). An empty result usually means the docs aren't cached yet — fetch_doc the relevant llms.txt first, or check list_sources. Supports AND / OR / NOT, NEAR(), and \"quoted phrases\"; quote any term containing . : - / (e.g. \"Bun.serve\") or it raises an FTS5 syntax error. Returns [{url, snippet, score}] where score is BM25 (more negative = better match). Prefer this for exact terms/API names; use vector_search_docs for conceptual queries.",
   inputSchema: {
-    query: z.string().describe("FTS5 query string"),
-    source: z.string().optional().describe("Filter to docs from this exact llms.txt source URL"),
+    query: z.string().describe("FTS5 query. Quote terms with punctuation: \"Bun.serve\". Operators: AND OR NOT NEAR() prefix*"),
+    source: z.string().optional().describe("Filter to this exact llms.txt source URL (get valid values from list_sources)"),
     limit: z.number().int().positive().max(100).optional().default(10),
   },
 }
 
 vectorSearchConfig := {
-  description: "Semantic vector search across cached docs (MiniLM-L6-v2). Requires LX_EMBED_ENABLED=1. Returns top matches with chunk text + distance score.",
+  description: "Semantic vector search (MiniLM-L6-v2) for conceptual/paraphrased queries when you don't know the exact keywords. Requires the embedding runtime (LX_EMBED_ENABLED=1 at fetch time); returns an error if unavailable — fall back to search_docs. Only docs fetched with embeddings enabled will match (a `warning` field flags un-embedded docs). Returns {results:[{url, chunk_text, score}], warning}; lower score = closer.",
   inputSchema: {
     query: z.string().describe("Natural-language query"),
-    source: z.string().optional().describe("Filter to docs from this exact llms.txt source URL"),
+    source: z.string().optional().describe("Filter to this exact llms.txt source URL (get valid values from list_sources)"),
     top_k: z.number().int().positive().max(100).optional().default(10),
   },
 }
 
 listSourcesConfig := {
-  description: "List all crawled llms.txt sources in the lx cache, with doc counts and last-fetched timestamps.",
+  description: "Start here to discover what's cached. Lists crawled llms.txt sources with doc counts and last-fetched timestamps. Use the returned source_url values as the exact `source` filter for search_docs / vector_search_docs / list_docs. Note: individually-fetched docs and crawled sub-links may be searchable without appearing here.",
   inputSchema: {},
 }
 
 listDocsConfig := {
-  description: "List cached markdown documents. Optional `source` filter scopes to a specific llms.txt.",
+  description: "List cached doc URLs with fetched_at/expires_at. Pass `source` (from list_sources) to scope — an unfiltered cache can hold thousands of docs. Use `limit` to cap output and avoid overflowing context. Use to confirm a doc is cached before fetch_doc/search_docs.",
   inputSchema: {
-    source: z.string().optional().describe("Filter to docs from this exact llms.txt source URL"),
+    source: z.string().optional().describe("Filter to this exact llms.txt source URL (get valid values from list_sources)"),
+    limit: z.number().int().positive().max(1000).optional().default(100).describe("Max URLs to return; default 100"),
   },
 }
 
@@ -79,28 +80,37 @@ handleVectorSearch := async ({ query, source, top_k }: { query: string, source?:
       isError: true
     }
   k := top_k ?? 10
-  qEmb := await embedText query
-  raw := vectorSearch qEmb, k * 4, source
-  seen := new Set<string>()
-  out: typeof raw .= []
-  for h of raw
-    if out.length >= k then break
-    if seen.has h.url then continue
-    seen.add h.url
-    out.push h
-  unembedded := listUnembeddedDocs source
-  payload := {
-    results: out,
-    warning: if unembedded.length > 0 then `${unembedded.length} cached doc(s) lack embeddings and will not match. Re-fetch with --fresh to embed.` else null
-  }
-  { content: [{ type: "text", text: JSON.stringify(payload, null, 2) }] }
+  // The embedding runtime is native and can fail to load even when isVecAvailable()
+  // reported true — catch it and return a recoverable message, not an unhandled crash.
+  try
+    qEmb := await embedText query
+    raw := vectorSearch qEmb, k * 4, source
+    seen := new Set<string>()
+    out: typeof raw .= []
+    for h of raw
+      if out.length >= k then break
+      if seen.has h.url then continue
+      seen.add h.url
+      out.push h
+    unembedded := listUnembeddedDocs source
+    payload := {
+      results: out.map (h) => { url: h.url, chunk_text: h.chunk_text, score: h.score },
+      warning: if unembedded.length > 0 then `${unembedded.length} cached doc(s) lack embeddings and will not match. Re-fetch with --fresh to embed.` else null
+    }
+    { content: [{ type: "text", text: JSON.stringify(payload, null, 2) }] }
+  catch err
+    {
+      content: [{ type: "text", text: `Error: vector search failed — ${(err as Error).message}. The embedding runtime may be unavailable on this platform; use search_docs (keyword/FTS5) instead.` }]
+      isError: true
+    }
 
 handleListSources := async () =>
   { content: [{ type: "text", text: JSON.stringify(listSources(), null, 2) }] }
 
-handleListDocs := async ({ source }: { source?: string }) =>
+handleListDocs := async ({ source, limit }: { source?: string, limit?: number }) =>
   docs := listDocuments source
-  payload := docs.map (d) => { url: d.url, fetched_at: d.fetched_at, expires_at: d.expires_at }
+  capped := docs.slice 0, limit ?? 100
+  payload := capped.map (d) => { url: d.url, fetched_at: d.fetched_at, expires_at: d.expires_at }
   { content: [{ type: "text", text: JSON.stringify(payload, null, 2) }] }
 
 export buildServer := (): McpServer =>

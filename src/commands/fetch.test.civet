@@ -227,6 +227,49 @@ describe 'fetch', =>
         last_modified: null
       await expect(runFetch 'https://example.com/doc.md', { ttl: '7d', fresh: false, range: 'bad' }).rejects.toThrow 'exit:2'
 
+    test 'single-line range N', async =>
+      upsertDocument
+        url: 'https://example.com/doc.md'
+        content: 'line1\nline2\nline3'
+        content_hash: 'h0'
+        expires_at: null
+        etag: null
+        last_modified: null
+      await runFetch 'https://example.com/doc.md', { ttl: '7d', fresh: false, range: '2' }
+      expect(stdoutOutput).toBe 'line2\n'
+
+    test 'open-ended range N: runs to EOF', async =>
+      upsertDocument
+        url: 'https://example.com/doc.md'
+        content: 'line1\nline2\nline3'
+        content_hash: 'h0'
+        expires_at: null
+        etag: null
+        last_modified: null
+      await runFetch 'https://example.com/doc.md', { ttl: '7d', fresh: false, range: '2:' }
+      expect(stdoutOutput).toBe 'line2\nline3\n'
+
+    test 'reversed range → exit 2', async =>
+      upsertDocument
+        url: 'https://example.com/doc.md'
+        content: 'line1\nline2\nline3'
+        content_hash: 'h0'
+        expires_at: null
+        etag: null
+        last_modified: null
+      await expect(runFetch 'https://example.com/doc.md', { ttl: '7d', fresh: false, range: '3:1' }).rejects.toThrow 'exit:2'
+
+    test 'bad --ttl with --fresh is rejected before the cache is wiped', async =>
+      upsertDocument
+        url: 'https://example.com/doc.md'
+        content: '# Keep me'
+        content_hash: 'h0'
+        expires_at: null
+        etag: null
+        last_modified: null
+      await expect(runFetch 'https://example.com/doc.md', { ttl: '5x', fresh: true }).rejects.toThrow 'exit:2'
+      expect(getDocument 'https://example.com/doc.md').not.toBeNull()
+
   describe 'output newline', =>
     test 'adds newline when content lacks one', async =>
       upsertDocument

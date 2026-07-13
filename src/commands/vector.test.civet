@@ -88,4 +88,5 @@ describe 'vector', =>
       last_modified: null
     await runVector 'q', { topK: 5, json: true }, { embedText: fakeEmbedZeroes }
     expect(stderrOutput).toContain 'no embeddings'
-    expect(stderrOutput).toContain 'https://x.com/un.md'
+    expect(stderrOutput).toContain '1 cached doc(s)'
+    expect(stderrOutput).toContain 'LX_EMBED_ENABLED=1 lx fetch'

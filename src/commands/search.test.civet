@@ -42,6 +42,12 @@ describe 'search', =>
     runSearch 'zzzzzznothingmatches', { limit: 10, json: false }
     expect(stderrOutput).toContain 'No matches'
 
+  test 'invalid FTS5 query → exit 2 with tip, no crash', =>
+    baseDoc 'https://x.com/a.md', '# Bun.serve docs'
+    expect(=> runSearch 'Bun.serve', { limit: 10, json: false }).toThrow 'exit:2'
+    expect(stderrOutput).toContain 'invalid FTS5 query'
+    expect(stderrOutput).toContain 'Tip:'
+
   test 'finds doc by content', =>
     baseDoc 'https://x.com/a.md', '# Auth flow\n\nThis describes authentication.'
     runSearch 'authentication', { limit: 10, json: false }

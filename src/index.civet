@@ -33,7 +33,27 @@ HELP := """
 
   list options:
     --source <url>         filter to a specific llms.txt source
+
+  Examples:
+    lx fetch https://bun.sh/llms.txt        # populate cache (crawls linked docs)
+    lx search "http server"                 # keyword search the cache
+    lx list                                 # see what's cached
+    lx fetch https://bun.sh/llms-full.txt   # prints a heading/line-range map;
+                                            #   pull a section with --range 40:120
+
+  Tip: embeddings for `vector` are built during fetch — set LX_EMBED_ENABLED=1
+  before fetching, then run `LX_EMBED_ENABLED=1 lx vector "<query>"`.
 """
+
+// Parse a positive-integer flag up front so a bad value fails cleanly instead of
+// flowing into SQLite as `LIMIT NaN` and crashing with a compiled-source dump.
+parsePositiveIntFlag := (raw: string | undefined, fallback: number, flag: string): number =>
+  unless raw? then return fallback
+  n := parseInt raw, 10
+  if Number.isNaN(n) or n < 1
+    process.stderr.write `Error: --${flag} must be a positive integer, got: ${raw}\n`
+    process.exit 2
+  n
 
 export interface MainDeps
   runFetch?: typeof runFetch
@@ -109,7 +129,7 @@ export main := async (argv: string[], deps?: MainDeps): Promise<void> =>
         process.exit 2
       _runSearch query,
         source: values.source
-        limit: parseInt(values.limit ?? "10", 10)
+        limit: parsePositiveIntFlag values.limit, 10, "limit"
         json: values.json ?? false
       process.exit 0
 
@@ -127,7 +147,7 @@ export main := async (argv: string[], deps?: MainDeps): Promise<void> =>
         process.exit 2
       await _runVector query,
         source: values.source
-        topK: parseInt(values["top-k"] ?? "10", 10)
+        topK: parsePositiveIntFlag values["top-k"], 10, "top-k"
         json: values.json ?? false
       process.exit 0
 
@@ -139,4 +159,12 @@ export main := async (argv: string[], deps?: MainDeps): Promise<void> =>
       process.stderr.write `Error: unknown subcommand: ${subcommand}\n\n${HELP}\n`
       process.exit 2
 
-if import.meta.main then await main Bun.argv.slice 2
+// Backstop for the real CLI only (never the test harness, where main is imported
+// directly): turn any uncaught error into a one-line message instead of a
+// compiled-source stack dump.
+if import.meta.main
+  try
+    await main Bun.argv.slice 2
+  catch err
+    process.stderr.write `Error: ${(err as Error).message}\n`
+    process.exit 1

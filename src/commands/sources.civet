@@ -7,7 +7,7 @@ export runSources := (): void =>
   sources := listSources()
 
   if sources.length is 0
-    process.stderr.write "No crawled sources.\n"
+    process.stderr.write "No crawled sources. Fetch an llms.txt to crawl and index its links, e.g. lx fetch https://bun.sh/llms.txt\n"
     return
 
   for src of sources

@@ -1,4 +1,4 @@
-{ searchFts } from ../db.civet
+{ searchFts, type SearchHit } from ../db.civet
 
 export interface SearchOptions
   source?: string
@@ -24,14 +24,22 @@ export runSearch := (query: string, opts: SearchOptions): void =>
     process.stderr.write "Error: search query required\n"
     process.exit 2
 
-  hits := searchFts query, opts.limit, opts.source
+  // FTS5 treats bare punctuation (. : - / etc.) and unbalanced quotes as syntax:
+  // a raw query like `Bun.serve` throws. Catch it and hand back an actionable tip
+  // instead of a compiled-source stack dump.
+  hits: SearchHit[] .= []
+  try
+    hits = searchFts query, opts.limit, opts.source
+  catch err
+    process.stderr.write `Error: invalid FTS5 query — ${(err as Error).message}\n  Tip: quote terms containing . : - / e.g.  lx search '"Bun.serve"'  ·  operators: AND OR NOT NEAR() and prefix* are supported.\n`
+    process.exit 2
 
   if opts.json
     process.stdout.write JSON.stringify(hits.map((h) => {url: h.url, snippet: renderSnippet(h.snippet, false), score: h.score})) + "\n"
     return
 
   if hits.length is 0
-    process.stderr.write "No matches.\n"
+    process.stderr.write "No matches. The cache may be empty or the docs aren't fetched yet — run 'lx sources' to see what's indexed, or 'lx fetch <llms.txt url>' to populate it.\n"
     return
 
   useColor := process.stdout.isTTY ?? false

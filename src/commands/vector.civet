@@ -1,4 +1,4 @@
-{ vectorSearch, listUnembeddedDocs, isVecAvailable } from ../db.civet
+{ vectorSearch, listUnembeddedDocs, isVecAvailable, type VectorHit } from ../db.civet
 { embedText, isEmbedEnabled } from ../embed.civet
 
 export interface VectorOptions
@@ -24,15 +24,21 @@ export runVector := async (query: string, opts: VectorOptions, deps?: VectorDeps
 
   unembedded := listUnembeddedDocs opts.source
   if unembedded.length > 0
-    process.stderr.write `Warning: ${unembedded.length} cached doc(s) have no embeddings and will not match. Re-fetch with --fresh to embed:\n`
-    for doc of unembedded
-      process.stderr.write `  ${doc.url}\n`
+    process.stderr.write `Warning: ${unembedded.length} cached doc(s) have no embeddings and will not match. Re-fetch to embed:  LX_EMBED_ENABLED=1 lx fetch <url> --fresh\n`
 
   _embedText := deps?.embedText ?? embedText
-  queryEmb := await _embedText query
 
-  // fetch more than topK to allow dedup-by-doc
-  rawHits := vectorSearch queryEmb, opts.topK * 4, opts.source
+  // The embedding runtime is native (onnxruntime) and can fail to load on some
+  // platforms even when isVecAvailable() reported true. Surface a recoverable
+  // message pointing at keyword search instead of a raw loader crash.
+  rawHits: VectorHit[] .= []
+  try
+    queryEmb := await _embedText query
+    // fetch more than topK to allow dedup-by-doc
+    rawHits = vectorSearch queryEmb, opts.topK * 4, opts.source
+  catch err
+    process.stderr.write `Error: vector search failed — ${(err as Error).message}\n  The embedding runtime may be unavailable on this platform; use 'lx search <query>' (keyword/FTS5) instead.\n`
+    process.exit 1
 
   // dedupe: keep best chunk per doc_url
   seen := new Set<string>()
@@ -44,11 +50,12 @@ export runVector := async (query: string, opts: VectorOptions, deps?: VectorDeps
     hits.push h
 
   if opts.json
-    process.stdout.write JSON.stringify(hits) + "\n"
+    // Emit a stable, curated shape — drop internal chunk_idx so consumers match search --json.
+    process.stdout.write JSON.stringify(hits.map((h) => {url: h.url, score: h.score, chunk_text: h.chunk_text})) + "\n"
     return
 
   if hits.length is 0
-    process.stderr.write "No matches.\n"
+    process.stderr.write "No matches. Try 'lx search <query>' for keyword search, or fetch more docs with 'lx fetch <llms.txt url>'.\n"
     return
 
   for hit of hits

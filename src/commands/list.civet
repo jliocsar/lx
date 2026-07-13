@@ -19,7 +19,7 @@ export runList := (opts?: ListOptions): void =>
   docs := listDocuments opts?.source
 
   if docs.length is 0
-    process.stderr.write "No cached documents.\n"
+    process.stderr.write "No cached documents. Fetch one to populate the cache, e.g. lx fetch https://bun.sh/llms.txt\n"
     return
 
   for doc of docs
