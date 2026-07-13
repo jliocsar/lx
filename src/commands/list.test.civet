@@ -1,6 +1,6 @@
 { test, expect, describe, beforeEach, afterEach, spyOn } from bun:test
 { runList } from ./list.civet
-{ upsertDocument, _clearDocuments } from ../db.civet
+{ upsertDocument, linkDocumentToSource, _clearDocuments } from ../db.civet
 
 describe 'list', =>
   stdoutOutput .= ''
@@ -110,3 +110,34 @@ describe 'list', =>
     seed 'https://a.com/a.md', null
     runList()
     expect(stderrOutput).toBe ''
+
+  describe 'roots and nesting', =>
+    seedTree := =>
+      seed 'https://ai-sdk.dev/llms.txt', null
+      seed 'https://ai-sdk.dev/docs/getting-started.md', null
+      seed 'https://ai-sdk.dev/docs/api.md', null
+      seed 'https://standalone.com/notes.md', null
+      linkDocumentToSource 'https://ai-sdk.dev/docs/getting-started.md', 'https://ai-sdk.dev/llms.txt'
+      linkDocumentToSource 'https://ai-sdk.dev/docs/api.md', 'https://ai-sdk.dev/llms.txt'
+
+    test 'default shows only top-level roots, not crawled children', =>
+      seedTree()
+      runList()
+      expect(stdoutOutput).toContain 'https://ai-sdk.dev/llms.txt'
+      expect(stdoutOutput).toContain 'https://standalone.com/notes.md'
+      expect(stdoutOutput).not.toContain 'getting-started.md'
+      expect(stdoutOutput).not.toContain 'docs/api.md'
+
+    test 'default annotates roots with a crawled-doc count', =>
+      seedTree()
+      runList()
+      expect(stdoutOutput).toContain '2 crawled doc(s)'
+
+    test '--all nests children under their root, indented', =>
+      seedTree()
+      runList { all: true }
+      expect(stdoutOutput).toContain 'https://ai-sdk.dev/llms.txt\n    https://ai-sdk.dev/docs/'
+      expect(stdoutOutput).toContain '    https://ai-sdk.dev/docs/getting-started.md'
+      expect(stdoutOutput).toContain '    https://ai-sdk.dev/docs/api.md'
+      // standalone root still appears with no children under it
+      expect(stdoutOutput).toContain 'https://standalone.com/notes.md'

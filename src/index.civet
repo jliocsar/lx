@@ -12,7 +12,7 @@ HELP := """
   Usage:
     lx fetch <url> [options]   fetch and cache markdown (llms.txt, llms-full.txt,
                                a .md/.mdx, or any URL via content negotiation)
-    lx list [--source <url>]   list cached documents
+    lx list [--all]            list cached llms.txt roots (--all nests crawled docs)
     lx sources                 list crawled llms.txt sources
     lx search <query> [...]    full-text search (FTS5) across the cache
     lx vector <query> [...]    semantic search (requires LX_EMBED_ENABLED=1)
@@ -32,9 +32,10 @@ HELP := """
     --json                 emit JSON output
 
   list options:
-    --source <url>         filter to a specific llms.txt source
-    --limit <N>            max docs to show [default: 50]
-    --offset <N>           skip the first N docs (pagination)
+    --all                  nest every crawled doc under its root llms.txt
+    --source <url>         list docs crawled from this llms.txt (flat)
+    --limit <N>            max roots to show [default: 50; unlimited with --all]
+    --offset <N>           skip the first N roots (pagination)
 
   Examples:
     lx fetch https://bun.sh/llms.txt        # populate cache (crawls linked docs)
@@ -109,12 +110,14 @@ export main := async (argv: string[], deps?: MainDeps): Promise<void> =>
         args: rest
         options:
           source: { type: "string" }
+          all: { type: "boolean", default: false }
           limit: { type: "string" }
           offset: { type: "string" }
         allowPositionals: true
       _runList
         source: values.source
-        limit: parseIntFlag values.limit, 50, "limit"
+        all: values.all ?? false
+        limit: if values.limit? then parseIntFlag values.limit, 50, "limit" else undefined
         offset: parseIntFlag values.offset, 0, "offset", 0
       process.exit 0
 

@@ -117,6 +117,13 @@ export class DocListing
   fetched_at: number = 0
   expires_at: number | null = null
 
+// A crawled child doc plus the root llms.txt it was crawled from.
+export class ChildDoc
+  source_url: string = ""
+  url: string = ""
+  fetched_at: number = 0
+  expires_at: number | null = null
+
 export class SearchHit
   url: string = ""
   snippet: string = ""
@@ -179,6 +186,29 @@ countDocsBySourceStmt := db.prepare<{ n: number }, [string]> """
   JOIN document_sources ds ON ds.doc_url = d.url
   WHERE ds.source_url = ?
 """
+
+// Top-level roots: docs that were never crawled as a child of some llms.txt —
+// i.e. the llms.txt sources themselves plus standalone .md / llms-full.txt fetches.
+listRootDocsStmt := (db.prepare<DocListing, [number, number]> """
+  SELECT url, fetched_at, expires_at FROM documents
+  WHERE url NOT IN (SELECT doc_url FROM document_sources)
+  ORDER BY fetched_at DESC
+  LIMIT ? OFFSET ?
+""").as DocListing
+
+countRootDocsStmt := db.prepare<{ n: number }, []> """
+  SELECT COUNT(*) AS n FROM documents
+  WHERE url NOT IN (SELECT doc_url FROM document_sources)
+"""
+
+// Every crawled child paired with its root, newest first — grouped in JS for the
+// nested `--all` view in one query instead of N per-root lookups.
+listAllChildrenStmt := (db.prepare<ChildDoc, []> """
+  SELECT ds.source_url AS source_url, d.url AS url, d.fetched_at AS fetched_at, d.expires_at AS expires_at
+  FROM document_sources ds
+  JOIN documents d ON d.url = ds.doc_url
+  ORDER BY d.fetched_at DESC
+""").as ChildDoc
 
 upsertSourceStmt := db.prepare """
   INSERT OR IGNORE INTO document_sources (doc_url, source_url) VALUES (?, ?)
@@ -244,6 +274,15 @@ export listDocumentsPage := (opts: ListPageOptions): DocListing[] =>
 export countDocuments := (source?: string): number =>
   row := if source? then countDocsBySourceStmt.get source else countDocsStmt.get()
   row?.n ?? 0
+
+export listRootDocuments := (opts: { limit: number, offset: number }): DocListing[] =>
+  listRootDocsStmt.all opts.limit, opts.offset
+
+export countRootDocuments := (): number =>
+  countRootDocsStmt.get()?.n ?? 0
+
+export listAllChildren := (): ChildDoc[] =>
+  listAllChildrenStmt.all()
 
 export linkDocumentToSource := (docUrl: string, sourceUrl: string): void =>
   upsertSourceStmt.run docUrl, sourceUrl

@@ -1,4 +1,4 @@
-{ listDocumentsPage, countDocuments } from ../db.civet
+{ listDocumentsPage, countDocuments, listRootDocuments, countRootDocuments, listAllChildren, listSources } from ../db.civet
 
 formatDate := (ts: number): string =>
   new Date(ts * 1000).toISOString().slice 0, 19
@@ -16,35 +16,75 @@ DEFAULT_LIMIT := 50
 
 export interface ListOptions
   source?: string
+  all?: boolean
   limit?: number
   offset?: number
 
-export runList := (opts?: ListOptions): void =>
-  limit := opts?.limit ?? DEFAULT_LIMIT
-  offset := opts?.offset ?? 0
+renderDoc := (url: string, fetchedAt: number, expiresAt: number | null, suffix: string): string =>
+  `${url}\n  fetched: ${formatDate fetchedAt}  ttl: ${formatTTL expiresAt}${suffix}\n`
 
-  total := countDocuments opts?.source
+writeFooter := (offset: number, shown: number, total: number, limit: number, opts?: ListOptions): void =>
+  shownEnd := offset + shown
+  unless shownEnd < total or offset > 0 then return
+  process.stderr.write `Showing ${offset + 1}–${shownEnd} of ${total}.`
+  if shownEnd < total
+    next .= `lx list --offset ${shownEnd}`
+    if opts?.all then next += " --all"
+    if limit >= 0 and limit !== DEFAULT_LIMIT then next += ` --limit ${limit}`
+    if opts?.source? then next += ` --source ${opts.source}`
+    process.stderr.write ` Next page: ${next}`
+  process.stderr.write "\n"
+
+export runList := (opts?: ListOptions): void =>
+  all := opts?.all ?? false
+  offset := opts?.offset ?? 0
+  // --all lifts the default cap (SQLite treats LIMIT -1 as unlimited) unless the
+  // caller passed an explicit --limit.
+  limit := opts?.limit ?? (if all then -1 else DEFAULT_LIMIT)
+
+  // Flat view scoped to a single source's crawled docs.
+  if opts?.source?
+    total := countDocuments opts.source
+    if total is 0
+      process.stderr.write `No cached documents for source ${opts.source}. Fetch it with: lx fetch ${opts.source}\n`
+      return
+    docs := listDocumentsPage { source: opts.source, limit, offset }
+    if docs.length is 0
+      process.stderr.write `No documents at offset ${offset} (source holds ${total}). Try a smaller --offset.\n`
+      return
+    for doc of docs
+      process.stdout.write renderDoc doc.url, doc.fetched_at, doc.expires_at, ""
+    writeFooter offset, docs.length, total, limit, opts
+    return
+
+  // Default: only top-level roots (llms.txt sources + standalone docs that aren't
+  // crawled children of any source).
+  total := countRootDocuments()
   if total is 0
     process.stderr.write "No cached documents. Fetch one to populate the cache, e.g. lx fetch https://bun.sh/llms.txt\n"
     return
-
-  docs := listDocumentsPage { source: opts?.source, limit, offset }
-  if docs.length is 0
-    process.stderr.write `No documents at offset ${offset} (cache holds ${total}). Try a smaller --offset.\n`
+  roots := listRootDocuments { limit, offset }
+  if roots.length is 0
+    process.stderr.write `No documents at offset ${offset} (cache holds ${total} root doc(s)). Try a smaller --offset.\n`
     return
 
-  for doc of docs
-    ttl := formatTTL doc.expires_at
-    fetched := formatDate doc.fetched_at
-    process.stdout.write `${doc.url}\n  fetched: ${fetched}  ttl: ${ttl}\n`
+  if all
+    // Group every crawled child under its root in a single pass.
+    childrenBySource := new Map<string, string[]>()
+    for child of listAllChildren()
+      existing := childrenBySource.get child.source_url
+      if existing? then existing.push child.url
+      else childrenBySource.set child.source_url, [child.url]
+    for root of roots
+      process.stdout.write `${root.url}\n`
+      for childUrl of childrenBySource.get(root.url) ?? []
+        process.stdout.write `    ${childUrl}\n`
+  else
+    // Annotate roots that have crawled children so the reader knows --all reveals more.
+    childCounts := new Map(listSources().map (s) => [s.source_url, s.doc_count])
+    for root of roots
+      count := childCounts.get(root.url) ?? 0
+      suffix := if count > 0 then `  ·  ${count} crawled doc(s) — see: lx list --all` else ""
+      process.stdout.write renderDoc root.url, root.fetched_at, root.expires_at, suffix
 
-  // Pagination footer (stderr, so stdout stays a clean URL list for piping).
-  shownEnd := offset + docs.length
-  if shownEnd < total or offset > 0
-    process.stderr.write `Showing ${offset + 1}–${shownEnd} of ${total}.`
-    if shownEnd < total
-      next .= `lx list --offset ${shownEnd}`
-      if limit !== DEFAULT_LIMIT then next += ` --limit ${limit}`
-      if opts?.source? then next += ` --source ${opts.source}`
-      process.stderr.write ` Next page: ${next}`
-    process.stderr.write "\n"
+  writeFooter offset, roots.length, total, limit, opts
