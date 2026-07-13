@@ -1,7 +1,7 @@
 { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 { z } from "zod"
-{ getDocument, searchFts, vectorSearch, listSources, listDocuments, listUnembeddedDocs, isVecAvailable } from ../db.civet
+{ getDocument, searchFts, vectorSearch, listSources, listDocumentsPage, listUnembeddedDocs, isVecAvailable } from ../db.civet
 { runFetch } from ./fetch.civet
 { embedText, isEmbedEnabled } from ../embed.civet
 
@@ -108,9 +108,8 @@ handleListSources := async () =>
   { content: [{ type: "text", text: JSON.stringify(listSources(), null, 2) }] }
 
 handleListDocs := async ({ source, limit }: { source?: string, limit?: number }) =>
-  docs := listDocuments source
-  capped := docs.slice 0, limit ?? 100
-  payload := capped.map (d) => { url: d.url, fetched_at: d.fetched_at, expires_at: d.expires_at }
+  docs := listDocumentsPage { source, limit: limit ?? 100, offset: 0 }
+  payload := docs.map (d) => { url: d.url, fetched_at: d.fetched_at, expires_at: d.expires_at }
   { content: [{ type: "text", text: JSON.stringify(payload, null, 2) }] }
 
 export buildServer := (): McpServer =>

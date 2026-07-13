@@ -111,6 +111,12 @@ export class DocumentSource
   doc_url: string = ""
   source_url: string = ""
 
+// Lean projection for listings — url + timestamps, no content payload.
+export class DocListing
+  url: string = ""
+  fetched_at: number = 0
+  expires_at: number | null = null
+
 export class SearchHit
   url: string = ""
   snippet: string = ""
@@ -153,6 +159,26 @@ listDocsBySourceStmt := (db.prepare<Document, [string]> """
   WHERE ds.source_url = ?
   ORDER BY d.fetched_at DESC
 """).as Document
+
+// Paginated listing — selects only the columns `lx list` renders (no content
+// payload) and pushes LIMIT/OFFSET into SQLite so a large cache never loads every
+// row into memory just to print URLs.
+listDocsPageStmt := (db.prepare<DocListing, [number, number]> "SELECT url, fetched_at, expires_at FROM documents ORDER BY fetched_at DESC LIMIT ? OFFSET ?").as DocListing
+
+listDocsPageBySourceStmt := (db.prepare<DocListing, [string, number, number]> """
+  SELECT d.url, d.fetched_at, d.expires_at FROM documents d
+  JOIN document_sources ds ON ds.doc_url = d.url
+  WHERE ds.source_url = ?
+  ORDER BY d.fetched_at DESC
+  LIMIT ? OFFSET ?
+""").as DocListing
+
+countDocsStmt := db.prepare<{ n: number }, []> "SELECT COUNT(*) AS n FROM documents"
+countDocsBySourceStmt := db.prepare<{ n: number }, [string]> """
+  SELECT COUNT(*) AS n FROM documents d
+  JOIN document_sources ds ON ds.doc_url = d.url
+  WHERE ds.source_url = ?
+"""
 
 upsertSourceStmt := db.prepare """
   INSERT OR IGNORE INTO document_sources (doc_url, source_url) VALUES (?, ?)
@@ -205,6 +231,19 @@ export deleteDocument := (url: string): void =>
 export listDocuments := (source?: string): Document[] =>
   if source? then listDocsBySourceStmt.all source
   else listDocsStmt.all()
+
+export interface ListPageOptions
+  source?: string
+  limit: number
+  offset: number
+
+export listDocumentsPage := (opts: ListPageOptions): DocListing[] =>
+  if opts.source? then listDocsPageBySourceStmt.all opts.source, opts.limit, opts.offset
+  else listDocsPageStmt.all opts.limit, opts.offset
+
+export countDocuments := (source?: string): number =>
+  row := if source? then countDocsBySourceStmt.get source else countDocsStmt.get()
+  row?.n ?? 0
 
 export linkDocumentToSource := (docUrl: string, sourceUrl: string): void =>
   upsertSourceStmt.run docUrl, sourceUrl

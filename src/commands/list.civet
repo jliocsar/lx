@@ -1,4 +1,4 @@
-{ listDocuments } from ../db.civet
+{ listDocumentsPage, countDocuments } from ../db.civet
 
 formatDate := (ts: number): string =>
   new Date(ts * 1000).toISOString().slice 0, 19
@@ -12,17 +12,39 @@ formatTTL := (expiresAt: number | null): string =>
   if remaining < 86400 then return `${Math.floor remaining / 3600}h`
   `${Math.floor remaining / 86400}d`
 
+DEFAULT_LIMIT := 50
+
 export interface ListOptions
   source?: string
+  limit?: number
+  offset?: number
 
 export runList := (opts?: ListOptions): void =>
-  docs := listDocuments opts?.source
+  limit := opts?.limit ?? DEFAULT_LIMIT
+  offset := opts?.offset ?? 0
 
-  if docs.length is 0
+  total := countDocuments opts?.source
+  if total is 0
     process.stderr.write "No cached documents. Fetch one to populate the cache, e.g. lx fetch https://bun.sh/llms.txt\n"
+    return
+
+  docs := listDocumentsPage { source: opts?.source, limit, offset }
+  if docs.length is 0
+    process.stderr.write `No documents at offset ${offset} (cache holds ${total}). Try a smaller --offset.\n`
     return
 
   for doc of docs
     ttl := formatTTL doc.expires_at
     fetched := formatDate doc.fetched_at
     process.stdout.write `${doc.url}\n  fetched: ${fetched}  ttl: ${ttl}\n`
+
+  // Pagination footer (stderr, so stdout stays a clean URL list for piping).
+  shownEnd := offset + docs.length
+  if shownEnd < total or offset > 0
+    process.stderr.write `Showing ${offset + 1}–${shownEnd} of ${total}.`
+    if shownEnd < total
+      next .= `lx list --offset ${shownEnd}`
+      if limit !== DEFAULT_LIMIT then next += ` --limit ${limit}`
+      if opts?.source? then next += ` --source ${opts.source}`
+      process.stderr.write ` Next page: ${next}`
+    process.stderr.write "\n"

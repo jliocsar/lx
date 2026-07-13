@@ -33,6 +33,8 @@ HELP := """
 
   list options:
     --source <url>         filter to a specific llms.txt source
+    --limit <N>            max docs to show [default: 50]
+    --offset <N>           skip the first N docs (pagination)
 
   Examples:
     lx fetch https://bun.sh/llms.txt        # populate cache (crawls linked docs)
@@ -45,13 +47,13 @@ HELP := """
   before fetching, then run `LX_EMBED_ENABLED=1 lx vector "<query>"`.
 """
 
-// Parse a positive-integer flag up front so a bad value fails cleanly instead of
-// flowing into SQLite as `LIMIT NaN` and crashing with a compiled-source dump.
-parsePositiveIntFlag := (raw: string | undefined, fallback: number, flag: string): number =>
+// Parse an integer flag up front so a bad value fails cleanly instead of flowing
+// into SQLite as `LIMIT NaN` and crashing with a compiled-source dump.
+parseIntFlag := (raw: string | undefined, fallback: number, flag: string, min: number = 1): number =>
   unless raw? then return fallback
   n := parseInt raw, 10
-  if Number.isNaN(n) or n < 1
-    process.stderr.write `Error: --${flag} must be a positive integer, got: ${raw}\n`
+  if Number.isNaN(n) or n < min
+    process.stderr.write `Error: --${flag} must be an integer ≥ ${min}, got: ${raw}\n`
     process.exit 2
   n
 
@@ -107,8 +109,13 @@ export main := async (argv: string[], deps?: MainDeps): Promise<void> =>
         args: rest
         options:
           source: { type: "string" }
+          limit: { type: "string" }
+          offset: { type: "string" }
         allowPositionals: true
-      _runList { source: values.source }
+      _runList
+        source: values.source
+        limit: parseIntFlag values.limit, 50, "limit"
+        offset: parseIntFlag values.offset, 0, "offset", 0
       process.exit 0
 
     when "sources"
@@ -129,7 +136,7 @@ export main := async (argv: string[], deps?: MainDeps): Promise<void> =>
         process.exit 2
       _runSearch query,
         source: values.source
-        limit: parsePositiveIntFlag values.limit, 10, "limit"
+        limit: parseIntFlag values.limit, 10, "limit"
         json: values.json ?? false
       process.exit 0
 
@@ -147,7 +154,7 @@ export main := async (argv: string[], deps?: MainDeps): Promise<void> =>
         process.exit 2
       await _runVector query,
         source: values.source
-        topK: parsePositiveIntFlag values["top-k"], 10, "top-k"
+        topK: parseIntFlag values["top-k"], 10, "top-k"
         json: values.json ?? false
       process.exit 0
 

@@ -81,3 +81,32 @@ describe 'list', =>
     runList()
     expect(stdoutOutput).toContain 'https://a.com/a.md'
     expect(stdoutOutput).toContain 'https://b.com/b.md'
+
+  test 'limit caps output and prints a paginated footer', =>
+    for i of [1..5]
+      seed `https://x.com/${i}.md`, null
+    runList { limit: 2 }
+    matches := stdoutOutput.match(/https:\/\/x\.com\//g) ?? []
+    expect(matches.length).toBe 2
+    expect(stderrOutput).toContain 'Showing 1–2 of 5'
+    expect(stderrOutput).toContain 'lx list --offset 2 --limit 2'
+
+  test 'offset pages through and shows position', =>
+    for i of [1..5]
+      seed `https://x.com/${i}.md`, null
+    runList { limit: 2, offset: 4 }
+    matches := stdoutOutput.match(/https:\/\/x\.com\//g) ?? []
+    expect(matches.length).toBe 1
+    expect(stderrOutput).toContain 'Showing 5–5 of 5'
+    expect(stderrOutput).not.toContain 'Next page'
+
+  test 'offset past end → notice, no crash', =>
+    seed 'https://x.com/a.md', null
+    runList { offset: 50 }
+    expect(stdoutOutput).toBe ''
+    expect(stderrOutput).toContain 'No documents at offset 50'
+
+  test 'small cache prints no footer', =>
+    seed 'https://a.com/a.md', null
+    runList()
+    expect(stderrOutput).toBe ''
